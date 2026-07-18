@@ -1,7 +1,7 @@
 # Project Status: Resource Planning System (Go Backend)
 
 ## 🎯 Current Focus
-PostgreSQL-Adapter für Repositories und Unit of Work implementieren.
+Erste HTTP-Use-Case-Anbindung und Server-Bootstrap vorbereiten.
 
 ## ✅ Completed
 - [x] System Architecture and Requirements defined (`systemdesign.md`).
@@ -24,18 +24,25 @@ PostgreSQL-Adapter für Repositories und Unit of Work implementieren.
 - [x] Fachliche Constraints und Indizes definiert.
 - [x] Migrationen dokumentiert (`migrations/README.md`).
 - [x] Migrationen technisch validiert, soweit in der Umgebung möglich (Go-Checks ausgeführt; PostgreSQL-/Docker-Lauf mangels verfügbarer Tools nicht ausführbar).
+- [x] PostgreSQL-Connection-Pool-Adapter implementiert.
+- [x] PostgreSQL-Unit-of-Work implementiert.
+- [x] Transaktionsgebundene Repositories implementiert.
+- [x] PostgreSQL-AuditWriter implementiert.
+- [x] PostgreSQL-IdempotencyStore implementiert.
+- [x] PostgreSQL-Integrationstests ergänzt (mit Skip bei fehlender `TEST_DATABASE_URL`).
 
 ## 🔄 In Progress
-- [ ] PostgreSQL-Adapter für Repositories und Unit of Work implementieren.
+- [ ] Erste HTTP-Use-Case-Anbindung und Server-Bootstrap vorbereiten.
 
 ## ⏭️ Next Steps (in order)
-1. pgx-basierte Connection-Pool-Anbindung erstellen.
-2. PostgreSQL-Unit-of-Work implementieren.
-3. Transaktionsgebundene Repositories implementieren.
-4. AuditWriter im selben Transaktionskontext implementieren.
-5. IdempotencyStore implementieren.
-6. Integrationstests gegen PostgreSQL ergänzen.
-7. Erste HTTP-Use-Case-Anbindung vorbereiten.
+1. Server-Konfiguration definieren.
+2. PostgreSQL-Pool im Composition Root verdrahten.
+3. HTTP-Adapter mit Go 1.22 ServeMux erstellen.
+4. Einheitliche Fehlerantworten definieren.
+5. Erste Request- und Allocation-Endpunkte anbinden.
+6. Authentifizierungs-Port vorbereiten.
+7. SSE-Adapter vorbereiten.
+8. End-to-End-Tests ergänzen.
 
 ## ⚠️ Known Issues / Tech Debt
 - Root-`main.go` ist ein IDE-Template und nicht Teil der Hex-Arch-Laufzeit.
