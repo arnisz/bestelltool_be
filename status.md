@@ -1,7 +1,7 @@
 # Project Status: Resource Planning System (Go Backend)
 
 ## 🎯 Current Focus
-PostgreSQL-Schema und Migrationen auf Basis der definierten Application-Ports und Use Cases entwerfen.
+PostgreSQL-Adapter für Repositories und Unit of Work implementieren.
 
 ## ✅ Completed
 - [x] System Architecture and Requirements defined (`systemdesign.md`).
@@ -18,17 +18,24 @@ PostgreSQL-Schema und Migrationen auf Basis der definierten Application-Ports un
 - [x] AuditWriter- und IdempotencyStore-Ports definiert.
 - [x] Erste transaktionale Use Cases implementiert.
 - [x] Application-Unit-Tests mit In-Memory-Fakes implementiert.
+- [x] PostgreSQL-Schema entworfen.
+- [x] Initiale Up- und Down-Migrationen erstellt.
+- [x] Audit- und Idempotency-Tabellen erstellt.
+- [x] Fachliche Constraints und Indizes definiert.
+- [x] Migrationen dokumentiert (`migrations/README.md`).
+- [x] Migrationen technisch validiert, soweit in der Umgebung möglich (Go-Checks ausgeführt; PostgreSQL-/Docker-Lauf mangels verfügbarer Tools nicht ausführbar).
 
 ## 🔄 In Progress
-- [ ] PostgreSQL-Schema und Migrationen entwerfen.
+- [ ] PostgreSQL-Adapter für Repositories und Unit of Work implementieren.
 
 ## ⏭️ Next Steps (in order)
-1. PostgreSQL-Schema und Migrationen entwerfen.
-2. PostgreSQL-Adapter für Repositories und Unit of Work implementieren.
-3. Audit-Persistierung im selben Transaktionskontext anbinden.
-4. IdempotencyStore im PostgreSQL-Adapter implementieren.
-5. Erste HTTP-Use-Case-Anbindung im Adapter vorbereiten.
-6. End-to-End-Tests für transaktionale Statusänderungen ergänzen.
+1. pgx-basierte Connection-Pool-Anbindung erstellen.
+2. PostgreSQL-Unit-of-Work implementieren.
+3. Transaktionsgebundene Repositories implementieren.
+4. AuditWriter im selben Transaktionskontext implementieren.
+5. IdempotencyStore implementieren.
+6. Integrationstests gegen PostgreSQL ergänzen.
+7. Erste HTTP-Use-Case-Anbindung vorbereiten.
 
 ## ⚠️ Known Issues / Tech Debt
 - Root-`main.go` ist ein IDE-Template und nicht Teil der Hex-Arch-Laufzeit.
