@@ -102,7 +102,18 @@ SET status = $1,
     version = $9,
     updated_at = $10
 WHERE id = $11
-  AND version = $12`,
+  AND version = $12
+  AND (
+      status IS DISTINCT FROM $1 OR
+      execution_state IS DISTINCT FROM $2 OR
+      execution_note IS DISTINCT FROM $3 OR
+      context_ref IS DISTINCT FROM $4 OR
+      context_label IS DISTINCT FROM $5 OR
+      wish_from IS DISTINCT FROM $6 OR
+      wish_until IS DISTINCT FROM $7 OR
+      note IS DISTINCT FROM $8 OR
+      updated_at IS DISTINCT FROM $10
+  )`,
 		string(req.Status),
 		string(req.ExecutionState),
 		req.ExecutionNote,

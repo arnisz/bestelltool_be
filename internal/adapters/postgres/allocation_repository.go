@@ -79,7 +79,18 @@ SET request_id = $1,
     version = $9,
     updated_at = $10
 WHERE id = $11
-  AND version = $12`,
+  AND version = $12
+  AND (
+      request_id IS DISTINCT FROM $1 OR
+      resource_id IS DISTINCT FROM $2 OR
+      status IS DISTINCT FROM $3 OR
+      planned_from IS DISTINCT FROM $4 OR
+      planned_until IS DISTINCT FROM $5 OR
+      return_requested_at IS DISTINCT FROM $6 OR
+      shipped_at IS DISTINCT FROM $7 OR
+      received_at IS DISTINCT FROM $8 OR
+      updated_at IS DISTINCT FROM $10
+  )`,
 		string(a.RequestID),
 		string(a.ResourceID),
 		string(a.Status),

@@ -105,7 +105,18 @@ SET resource_class_id = $1,
     metadata = $9,
     version = $10
 WHERE id = $11
-  AND version = $12`,
+  AND version = $12
+  AND (
+      resource_class_id IS DISTINCT FROM $1 OR
+      serial_number IS DISTINCT FROM $2 OR
+      status IS DISTINCT FROM $3 OR
+      block_reason IS DISTINCT FROM $4 OR
+      block_note IS DISTINCT FROM $5 OR
+      holder_id IS DISTINCT FROM $6 OR
+      location IS DISTINCT FROM $7 OR
+      valid_until IS DISTINCT FROM $8 OR
+      metadata IS DISTINCT FROM $9
+  )`,
 		string(res.ResourceClassID),
 		res.SerialNumber,
 		string(res.Status),

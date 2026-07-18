@@ -5,6 +5,13 @@ import (
 	"context"
 )
 
+func mapActorRole(role domain.ActorRole) string {
+	if role == domain.ActorRoleDispatcher {
+		return "elz"
+	}
+	return string(role)
+}
+
 type auditWriter struct {
 	q querier
 }
@@ -28,7 +35,7 @@ INSERT INTO audit_events(
 		optionalTime(event.ClientOccurredAt),
 		event.ClientSeq,
 		string(event.ActorID),
-		string(event.ActorRole),
+		mapActorRole(event.ActorRole),
 		string(event.EntityType),
 		event.EntityID,
 		event.Action,

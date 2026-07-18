@@ -60,4 +60,5 @@
 ### Modellierungsnotiz (konservative Kompatibilität)
 - Domain speichert angeforderte ResourceClasses als Slice ohne explizite Mengenregel.
 - `request_resource_classes` verwendet daher `position` statt `(request_id, resource_class_id)` als Schlüssel, um potenzielle Mehrfachvorkommen nicht stillschweigend zu verbieten.
-- Rollenbezeichnung in `users` (`elz`) und Audit-Rollenkonstanten (`dispatcher`) differieren derzeit; Audit wird konservativ gemäß bestehender Domain-Audit-Konstanten gespeichert.
+- Rollenabbildung ist explizit harmonisiert: persistenter Audit-Wert ist `elz`.
+- Kompatibilität: Adapter mappt Domain-`dispatcher` beim Schreiben explizit auf `elz`; Migration `000004_align_actor_role_elz.*` stellt bestehende Audit-Daten/Constraint darauf um.

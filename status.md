@@ -1,7 +1,7 @@
 # Project Status: Resource Planning System (Go Backend)
 
 ## 🎯 Current Focus
-Erste HTTP-Use-Case-Anbindung und Server-Bootstrap vorbereiten.
+PostgreSQL-Adapter gegen die reale Raspberry-Pi-Testdatenbank validieren und Integrationstest-Abdeckung vervollständigen.
 
 ## ✅ Completed
 - [x] System Architecture and Requirements defined (`systemdesign.md`).
@@ -30,8 +30,11 @@ Erste HTTP-Use-Case-Anbindung und Server-Bootstrap vorbereiten.
 - [x] PostgreSQL-AuditWriter implementiert.
 - [x] PostgreSQL-IdempotencyStore implementiert.
 - [x] PostgreSQL-Integrationstests ergänzt (mit Skip bei fehlender `TEST_DATABASE_URL`).
+- [x] Konfliktbehandlung in PostgreSQL-Repositories geschärft: reine Versionssprünge ohne fachliche Feldänderung werden als Optimistic-Locking-Konflikt behandelt (Request/Resource/Allocation).
 
 ## 🔄 In Progress
+- [ ] PostgreSQL-Integrationstests gegen die Raspberry-Pi-Testdatenbank vollständig ausführen (lokal weiterhin Skip ohne `TEST_DATABASE_URL`).
+- [ ] Reale PostgreSQL-Validierung mit gesetzter `TEST_DATABASE_URL` durchführen (aktuell alle Adapter-Integrationstests als SKIP, da Variable in dieser Umgebung nicht gesetzt).
 - [ ] Erste HTTP-Use-Case-Anbindung und Server-Bootstrap vorbereiten.
 
 ## ⏭️ Next Steps (in order)
@@ -45,7 +48,7 @@ Erste HTTP-Use-Case-Anbindung und Server-Bootstrap vorbereiten.
 8. End-to-End-Tests ergänzen.
 
 ## ⚠️ Known Issues / Tech Debt
-- Root-`main.go` ist ein IDE-Template und nicht Teil der Hex-Arch-Laufzeit.
+- Derzeit keine zusätzlichen bekannten Laufzeitprobleme außerhalb der offenen In-Progress-Punkte dokumentiert.
 
 ## 📝 Rules for the AI Agent
 - **READ THIS FILE FIRST** at the start of every session or task.
