@@ -6,7 +6,7 @@
   - `000003_create_indexes.*`: Zugriffspfade, Dispatch-Indizes, partielle Exklusivitätsregel.
 
 ### Tabellen
-- `users`: persistierbare Benutzerstammdaten (`technician`, `elz`, `admin`) mit Deaktivierungsflag.
+- `users`: persistierbare Benutzerstammdaten (`technician`, `dispatcher`, `admin`) mit Deaktivierungsflag.
 - `resource_classes`: Klasse mit `metadata jsonb`.
 - `resources`: konkrete Ressource inkl. Status, Sperrgrund, Halter, `valid_until`, `version`.
 - `requests`: Anfrage inkl. Status, Execution-State, Wunschzeitraum, Kontext, `version`.
@@ -60,5 +60,4 @@
 ### Modellierungsnotiz (konservative Kompatibilität)
 - Domain speichert angeforderte ResourceClasses als Slice ohne explizite Mengenregel.
 - `request_resource_classes` verwendet daher `position` statt `(request_id, resource_class_id)` als Schlüssel, um potenzielle Mehrfachvorkommen nicht stillschweigend zu verbieten.
-- Rollenabbildung ist explizit harmonisiert: persistenter Audit-Wert ist `elz`.
-- Kompatibilität: Adapter mappt Domain-`dispatcher` beim Schreiben explizit auf `elz`; Migration `000004_align_actor_role_elz.*` stellt bestehende Audit-Daten/Constraint darauf um.
+- Rollenbezeichnung ist einheitlich `dispatcher` in allen Schichten (Domain, HTTP, DB). Migration `000005_unify_role_dispatcher.*` hat den früheren, abweichenden DB-Wert abgelöst.

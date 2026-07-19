@@ -1,13 +1,29 @@
 package usecases
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"time"
 
+	"bestelltool_be/internal/application/ports"
 	"bestelltool_be/internal/domain"
 )
+
+type noopEventPublisher struct{}
+
+func (noopEventPublisher) Publish(context.Context, ports.Event) error {
+	return nil
+}
+
+func withEventPublisher(publisher ports.EventPublisher) ports.EventPublisher {
+	if publisher != nil {
+		return publisher
+	}
+
+	return noopEventPublisher{}
+}
 
 // generateAuditID returns a random 32-character hex string for audit event IDs.
 func generateAuditID() string {

@@ -5,9 +5,6 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"path/filepath"
-	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -22,19 +19,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func migrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("determine postgres test file location")
-	}
-
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-
-	return filepath.Join(root, "migrations")
-}
-
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dbURL := os.Getenv("TEST_DATABASE_URL")
@@ -42,11 +26,13 @@ func testPool(t *testing.T) *pgxpool.Pool {
 		t.Skip("TEST_DATABASE_URL nicht gesetzt: PostgreSQL-Integrationstests werden übersprungen")
 	}
 	assertTestDatabaseURL(t, dbURL)
+	if err := RunEmbeddedMigrations(t.Context(), dbURL); err != nil {
+		t.Fatalf("RunEmbeddedMigrations() error = %v", err)
+	}
 	pool, err := NewPool(t.Context(), dbURL)
 	if err != nil {
 		t.Fatalf("NewPool() error = %v", err)
 	}
-	applyMigrations(t, pool)
 	truncateAll(t, pool)
 	t.Cleanup(func() {
 		pool.Close()
@@ -66,39 +52,6 @@ func assertTestDatabaseURL(t *testing.T, dbURL string) {
 	}
 	if !strings.Contains(strings.ToLower(dbName), "test") {
 		t.Fatalf("unsichere Testdatenbank %q: Datenbankname muss klar als Testdatenbank erkennbar sein", dbName)
-	}
-}
-
-func applyMigrations(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-	dir := migrationsDir(t)
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir %s error = %v", dir, err)
-	}
-	files := make([]string, 0)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if strings.HasSuffix(name, ".up.sql") {
-			files = append(files, name)
-		}
-	}
-	sort.Strings(files)
-	for _, f := range files {
-		b, err := os.ReadFile(filepath.Join(dir, f))
-		if err != nil {
-			t.Fatalf("ReadFile %s error = %v", f, err)
-		}
-		if _, err := pool.Exec(t.Context(), string(b)); err != nil {
-			if strings.Contains(err.Error(), "already exists") {
-				continue
-			}
-			t.Fatalf("exec migration %s from %s error = %v", f, dir, err)
-		}
 	}
 }
 
@@ -126,7 +79,7 @@ func seedCoreRefs(t *testing.T, q interface {
 	t.Helper()
 	if _, err := q.Exec(t.Context(), `INSERT INTO users(id, role, display_name) VALUES
 ('tech-1', 'technician', 'Tech One'),
-('dispatcher-1', 'elz', 'Dispatcher One')`); err != nil {
+('dispatcher-1', 'dispatcher', 'Dispatcher One')`); err != nil {
 		t.Fatalf("seed users error = %v", err)
 	}
 	if _, err := q.Exec(t.Context(), `INSERT INTO resource_classes(id, name) VALUES ('rc-1', 'RC1'),('rc-2', 'RC2')`); err != nil {
@@ -628,8 +581,8 @@ func TestAuditWriterAndAppendOnlyTrigger(t *testing.T) {
 	if err := pool.QueryRow(t.Context(), `SELECT actor_role, server_recorded_at FROM audit_events WHERE id='ae-1'`).Scan(&actorRole, &serverRecordedAt); err != nil {
 		t.Fatalf("scan audit event error = %v", err)
 	}
-	if actorRole != "elz" {
-		t.Fatalf("actor_role = %s, want elz", actorRole)
+	if actorRole != "dispatcher" {
+		t.Fatalf("actor_role = %s, want dispatcher", actorRole)
 	}
 	if serverRecordedAt.Equal(clientTime) {
 		t.Fatalf("server_recorded_at should be database controlled, got %v", serverRecordedAt)

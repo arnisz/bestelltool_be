@@ -1,7 +1,20 @@
 # Project Status: Resource Planning System (Go Backend)
 
 ## 🎯 Current Focus
-Autorisierung (Rollenprüfung pro Endpunkt): welche Endpunkte erfordern welche Rollen (Technician vs. Dispatcher vs. Admin). Klärt auch, wer einen Direct Transfer auslösen darf (bis dahin: nur Dispatcher).
+Dockerfile und `docker-compose.yml` für das Backend und die PostgreSQL-Datenbank erstellen (Grundlage für das künftige Deployment).
+
+## ⚙️ Server-Konfiguration (Umgebungsvariablen)
+
+| Variable | Required | Default | Beschreibung |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | ✅ | — | PostgreSQL Connection String |
+| `AUTH_STATIC_TOKENS` | ✅ | — | Statische Bearer-Token (`token:user-id:role,...`) |
+| `RUN_MIGRATIONS` | ❌ | `false` | Führt beim Serverstart eingebettete Up-Migrationen aus (`true`/`1`) |
+| `HTTP_ADDR` | ❌ | `:8080` | HTTP Listen-Adresse |
+| `HTTP_READ_TIMEOUT` | ❌ | `15s` | Read-Timeout |
+| `HTTP_WRITE_TIMEOUT` | ❌ | `15s` | Write-Timeout |
+| `HTTP_IDLE_TIMEOUT` | ❌ | `60s` | Idle-Timeout |
+| `HTTP_SHUTDOWN_TIMEOUT` | ❌ | `10s` | Graceful-Shutdown-Timeout |
 
 ## ✅ Completed
 - [x] System Architecture and Requirements defined (`systemdesign.md`).
@@ -52,19 +65,21 @@ Autorisierung (Rollenprüfung pro Endpunkt): welche Endpunkte erfordern welche R
 - [x] Domain-Unit-Tests für `TransferDirect` und `CompleteDirectTransfer` ergänzt (Success, Blocked, EmptyHolder, ShippedBack, WrongState, AlreadyCompleted, PendingReturnRequest).
 - [x] Use-Case-Unit-Tests für `TransferResourceUseCase` ergänzt (Success, BlockedGuard, AuditRollback, TerminalTarget, SameRequestGuard).
 - [x] PostgreSQL-Integrationstests für Direct-Transfer ergänzt — alle 10 Tests grün: `TestTransferResourceWithPostgres` (voller Use Case inkl. Unique-Index-Validierung) und `TestTransferResourceConflictNewAllocWhileOldActive` (Gegentest: Index feuert korrekt).
-
-## 🔄 In Progress
-- [ ] Autorisierung (Rollenprüfung pro Endpunkt): welche Endpunkte erfordern welche Rollen.
+- [x] **Rollenbasierte Autorisierung implementiert**: `ports.ErrForbidden` (→ 403), `requireRoles`-Middleware, explizite Rollenfreigabe an jeder Route. Neue Rollenkonstante `domain.ActorRoleAdmin` eingeführt. `StaticTokenAuthenticator` akzeptiert jetzt `technician`, `dispatcher`, `admin`, `system`. Berechtigungsmatrix in `systemdesign.md` dokumentiert. Architekturregel in `agents.md` festgeschrieben. Alle bestehenden Tests aktualisiert; neue Middleware- und Autorisierungsmatrix-Tests ergänzt. PostgreSQL-Integrationstests — alle 10 grün gegen Raspberry-Pi-Testdatenbank.
+- [x] **Rollenbezeichnung vereinheitlicht**: Migration `000005` setzt `'dispatcher'` als einzigen kanonischen Rollenwert in `users.role` und `audit_events.actor_role` durch. `mapActorRole`-Mapping-Funktion entfernt. Alle Schichten (Domain, HTTP, Token-Config, DB) verwenden jetzt denselben Wert `"dispatcher"`. Cross-Technician-Verhalten als bewusste Designentscheidung in `systemdesign.md` dokumentiert (vollständig auditsicher durch AuditEvent pro Transaktion).
+- [x] HTTP-Endpunkt für Direct Transfer angebunden (`POST /api/v1/resources/{id}/transfer`) mit strikter Rollenfreigabe nur für Dispatcher; Handler nutzt `decodeJSONBody`, `buildAuditMeta` und zentrales Fehler-Mapping. Composition Root in `main.go` verdrahtet. Handler-Tests für Success/400/401/403/404/409/422 ergänzt.
+- [x] SSE-Adapter vorbereitet: neuer Event-Port (`internal/application/ports/event.go`), in-memory SSE-Broker (`internal/adapters/sse`), geschützter Stream-Endpunkt `GET /api/v1/events` mit Rollenfilter (Dispatcher: alle Events, Techniker: nur eigene). Schreibende Use Cases publizieren typisierte Events; Composition Root verdrahtet Publisher + Stream. Unit-Tests für Broker/Handler ergänzt.
+- [x] Fachentscheidung finalisiert und dokumentiert: Direct Transfers und operative Ressourcenallokationen liegen ausschließlich beim Dispatcher; Techniker-zu-Techniker-Transfer ist ausgeschlossen (`systemdesign.md`).
+- [x] End-to-End-Test ergänzt: `TestResourceLifecycleE2E` verifiziert den vollständigen HTTP→UseCase→Repository→PostgreSQL-Durchstich über `httptest.Server` inkl. Rollen-Negativfall `403` für Techniker-Direct-Transfer (`internal/adapters/http/e2e_test.go`, Skip ohne `TEST_DATABASE_URL`).
+- [x] Migrations-Runner für den Serverstart implementiert: SQL-Migrationen via `go:embed` ins Binary eingebettet; zentraler Runner im Postgres-Adapter; optionaler Startup-Lauf über `RUN_MIGRATIONS` mit fail-fast bei Fehler.
+- [x] Deployment-Strategie für automatische Migrationen beim Serverstart dokumentiert (`docs/deployment.md`): klare Umgebungsregeln für `RUN_MIGRATIONS`, Multi-Instanz-Empfehlung (`RUN_MIGRATIONS=false` in Staging/Prod), dedizierter Pre-Deployment-Migrationsschritt und manuelle Rollback-Policy für Down-Migrationen.
 
 ## ⏭️ Next Steps (in order)
-1. HTTP-Endpunkt für Direct Transfer anbinden (nach Autorisierung, da rollenpflichtig).
-2. SSE-Adapter vorbereiten (nach Autorisierung, da Event-Streams rollengefiltert sein müssen: ELZ sieht alles, Techniker nur eigene Requests).
-3. End-to-End-Tests ergänzen.
-4. Migrations-Anwendung für den Server klären (Migrations-Runner beim Serverstart oder CLI-Befehl) — aktuell spielen nur die Integrationstests Migrationen ein; `resource_dev` wird manuell migriert.
+1. Dockerfile und `docker-compose.yml` für das Backend und die PostgreSQL-Datenbank erstellen (Grundlage für das künftige Deployment).
+2. Tech-Debt auflösen: Echte Session-/Token-basierte Authentifizierung statt `StaticTokenAuthenticator` umsetzen.
 
 ## ⚠️ Known Issues / Tech Debt
 - **StaticTokenAuthenticator** (`internal/adapters/auth`) ist eine Übergangslösung. Tokens stehen im Klartext in der Umgebungsvariable `AUTH_STATIC_TOKENS`. Vor Produktion durch eine echte Session-/Token-basierte Authentifizierung ersetzen (z. B. JWT mit Schlüsselrotation oder externe IdP-Integration).
-- Offene fachliche Entscheidung: Darf ein Direct Transfer nur von der ELZ freigegeben werden oder auch von Technikern untereinander (relevant für Offline-Sync und Autorisierung)? Bis zur Entscheidung: nur Dispatcher (documentiert in `systemdesign.md` Abschnitt 3).
 
 ## 📝 Rules for the AI Agent
 - **READ THIS FILE FIRST** at the start of every session or task.

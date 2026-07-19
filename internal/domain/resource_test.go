@@ -6,7 +6,7 @@ import (
 )
 
 func TestNewResource(t *testing.T) {
-	r, err := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, err := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -19,14 +19,14 @@ func TestNewResource(t *testing.T) {
 }
 
 func TestNewResourceInvalid(t *testing.T) {
-	_, err := NewResource("", "class1", "SN-1", "ELZ", nil, nil)
+	_, err := NewResource("", "class1", "SN-1", "Dispatcher", nil, nil)
 	if !errors.Is(err, ErrRequiredField) {
 		t.Fatalf("expected ErrRequiredField, got %v", err)
 	}
 }
 
 func TestResourceAllowedTransitions(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 
 	steps := []struct {
 		name   string
@@ -59,7 +59,7 @@ func TestResourceAllowedTransitions(t *testing.T) {
 }
 
 func TestResourceInspectionCanBlockAndReactivate(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	_ = r.Reserve("u1")
 	_ = r.MarkIssued()
 	_ = r.MarkInUse()
@@ -82,7 +82,7 @@ func TestResourceInspectionCanBlockAndReactivate(t *testing.T) {
 }
 
 func TestResourceInvalidTransitionKeepsState(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	oldStatus := r.Status
 	oldVersion := r.Version
 	err := r.MarkIssued()
@@ -95,7 +95,7 @@ func TestResourceInvalidTransitionKeepsState(t *testing.T) {
 }
 
 func TestResourceBlockedNeedsReason(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	_ = r.Reserve("u1")
 	_ = r.MarkIssued()
 	_ = r.MarkInUse()
@@ -114,7 +114,7 @@ func TestResourceBlockedNeedsReason(t *testing.T) {
 }
 
 func TestResourceNoAutomaticAvailabilityAfterShippedBack(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	_ = r.Reserve("u1")
 	_ = r.MarkIssued()
 	_ = r.MarkInUse()
@@ -127,7 +127,7 @@ func TestResourceNoAutomaticAvailabilityAfterShippedBack(t *testing.T) {
 }
 
 func TestResourceTransferDirectSuccess(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	_ = r.Reserve("u1")
 	_ = r.MarkIssued()
 	_ = r.MarkInUse()
@@ -148,7 +148,7 @@ func TestResourceTransferDirectSuccess(t *testing.T) {
 }
 
 func TestResourceTransferDirectBlockedResource(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	_ = r.Reserve("u1")
 	_ = r.MarkIssued()
 	_ = r.MarkInUse()
@@ -168,7 +168,7 @@ func TestResourceTransferDirectBlockedResource(t *testing.T) {
 }
 
 func TestResourceTransferDirectEmptyHolderID(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	_ = r.Reserve("u1")
 	_ = r.MarkIssued()
 	_ = r.MarkInUse()
@@ -185,7 +185,7 @@ func TestResourceTransferDirectEmptyHolderID(t *testing.T) {
 }
 
 func TestResourceTransferDirectFromShippedBack(t *testing.T) {
-	r, _ := NewResource("res1", "class1", "SN-1", "ELZ", nil, nil)
+	r, _ := NewResource("res1", "class1", "SN-1", "Dispatcher", nil, nil)
 	_ = r.Reserve("u1")
 	_ = r.MarkIssued()
 	_ = r.MarkInUse()

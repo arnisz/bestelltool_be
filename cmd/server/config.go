@@ -10,6 +10,7 @@ import (
 type serverConfig struct {
 	DatabaseURL     string
 	StaticTokens    string
+	RunMigrations   bool
 	HTTPAddr        string
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -40,6 +41,12 @@ func loadConfigFromEnv() (serverConfig, error) {
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = defaultHTTPAddr
 	}
+
+	runMigrations, err := parseRunMigrationsEnv("RUN_MIGRATIONS")
+	if err != nil {
+		return serverConfig{}, err
+	}
+	cfg.RunMigrations = runMigrations
 
 	readTimeout, err := parseDurationEnv("HTTP_READ_TIMEOUT", defaultReadTimeout)
 	if err != nil {
@@ -81,4 +88,20 @@ func parseDurationEnv(key string, fallback time.Duration) (time.Duration, error)
 	}
 
 	return d, nil
+}
+
+func parseRunMigrationsEnv(key string) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return false, nil
+	}
+
+	switch strings.ToLower(raw) {
+	case "1", "true":
+		return true, nil
+	case "0", "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be one of: true, false, 1, 0", key)
+	}
 }

@@ -69,6 +69,29 @@ func (f *fakeRequestReturnUseCase) Execute(_ context.Context, in usecases.Reques
 	return f.err
 }
 
+type fakeTransferResourceUseCase struct {
+	in  usecases.TransferResourceInput
+	err error
+}
+
+func (f *fakeTransferResourceUseCase) Execute(_ context.Context, in usecases.TransferResourceInput) error {
+	f.in = in
+	return f.err
+}
+
+type fakeEventStream struct {
+	principal    ports.Principal
+	events       chan ports.Event
+	unsubscribed bool
+}
+
+func (f *fakeEventStream) Subscribe(principal ports.Principal) (<-chan ports.Event, func()) {
+	f.principal = principal
+	return f.events, func() {
+		f.unsubscribed = true
+	}
+}
+
 type responseError struct {
 	Error struct {
 		Code    string `json:"code"`
@@ -79,7 +102,7 @@ type responseError struct {
 // ── Auth Middleware ────────────────────────────────────────────────────────────
 
 func TestAuthMiddlewareMissingHeader(t *testing.T) {
-	h := NewHandlerWithClock(newFakeAuth("user-1", "dispatcher"), &fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, time.Now)
+	h := NewHandlerWithClock(newFakeAuth("user-1", "dispatcher"), &fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{}, time.Now)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests", strings.NewReader(`{}`))
 	// No Authorization header.
@@ -97,7 +120,7 @@ func TestAuthMiddlewareMissingHeader(t *testing.T) {
 
 func TestAuthMiddlewareInvalidToken(t *testing.T) {
 	a := &fakeAuthenticator{err: fmt.Errorf("bad token: %w", ports.ErrUnauthenticated)}
-	h := NewHandlerWithClock(a, &fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, time.Now)
+	h := NewHandlerWithClock(a, &fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{}, time.Now)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer invalid-token")
@@ -116,12 +139,12 @@ func TestAuthMiddlewareInvalidToken(t *testing.T) {
 // TestAuthMiddlewareValidTokenPropagatesPrincipal verifies that a valid token
 // results in the Principal's identity reaching AuditMeta inside the use case.
 func TestAuthMiddlewareValidTokenPropagatesPrincipal(t *testing.T) {
-	wantUserID := domain.UserID("dispatcher-42")
-	wantRole := domain.ActorRoleDispatcher
+	wantUserID := domain.UserID("technician-42")
+	wantRole := domain.ActorRoleTechnician
 	createUC := &fakeCreateRequestUseCase{}
 	h := NewHandlerWithClock(
 		newFakeAuth(string(wantUserID), string(wantRole)),
-		createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, time.Now,
+		createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{}, time.Now,
 	)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests",
@@ -161,8 +184,8 @@ func TestBodyWithActorFieldsReturns400(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewHandlerWithClock(
-				newFakeAuth("user-1", "dispatcher"),
-				&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, time.Now,
+				newFakeAuth("user-1", "technician"),
+				&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{}, time.Now,
 			)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/requests", strings.NewReader(tt.body))
 			req.Header.Set("Authorization", "Bearer test-token")
@@ -208,7 +231,7 @@ func TestHandlerMissingPrincipalReturns500(t *testing.T) {
 // ── Existing Tests (updated for Bearer auth) ──────────────────────────────────
 
 func TestCreateRequestInvalidJSONReturnsBadRequest(t *testing.T) {
-	h := NewHandlerWithClock(newFakeAuth("user-1", "dispatcher"), &fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, func() time.Time {
+	h := NewHandlerWithClock(newFakeAuth("user-1", "technician"), &fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{}, func() time.Time {
 		return time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
 	})
 
@@ -241,7 +264,7 @@ func TestCreateRequestErrorMapping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			createUC := &fakeCreateRequestUseCase{err: fmt.Errorf("wrapped: %w", tt.err)}
-			h := NewHandlerWithClock(newFakeAuth("user-1", "dispatcher"), createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, func() time.Time {
+			h := NewHandlerWithClock(newFakeAuth("user-1", "technician"), createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{}, func() time.Time {
 				return time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
 			})
 
@@ -274,8 +297,8 @@ func TestCreateRequestSuccessAuditFromPrincipalAndDefaultCreatedAt(t *testing.T)
 
 	createUC := &fakeCreateRequestUseCase{out: created}
 	h := NewHandlerWithClock(
-		newFakeAuth("dispatcher-token-user", "dispatcher"),
-		createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{},
+		newFakeAuth("technician-token-user", "technician"),
+		createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{},
 		func() time.Time { return fixedNow },
 	)
 
@@ -290,11 +313,11 @@ func TestCreateRequestSuccessAuditFromPrincipalAndDefaultCreatedAt(t *testing.T)
 		t.Fatalf("status = %d, want 201", rec.Code)
 	}
 	// Actor identity comes from the Principal (Bearer token), NOT body or any header.
-	if createUC.in.Audit.ActorID != "dispatcher-token-user" {
-		t.Fatalf("audit actor id = %q, want dispatcher-token-user", createUC.in.Audit.ActorID)
+	if createUC.in.Audit.ActorID != "technician-token-user" {
+		t.Fatalf("audit actor id = %q, want technician-token-user", createUC.in.Audit.ActorID)
 	}
-	if createUC.in.Audit.ActorRole != domain.ActorRoleDispatcher {
-		t.Fatalf("audit actor role = %q, want dispatcher", createUC.in.Audit.ActorRole)
+	if createUC.in.Audit.ActorRole != domain.ActorRoleTechnician {
+		t.Fatalf("audit actor role = %q, want technician", createUC.in.Audit.ActorRole)
 	}
 	if createUC.in.CreatedAt != fixedNow {
 		t.Fatalf("created at = %v, want %v", createUC.in.CreatedAt, fixedNow)
@@ -317,7 +340,7 @@ func TestGetRequestSuccess(t *testing.T) {
 	}
 
 	getUC := &fakeGetRequestUseCase{out: reqEntity}
-	h := NewHandlerWithClock(newFakeAuth("user-1", "dispatcher"), &fakeCreateRequestUseCase{}, getUC, &fakeRequestReturnUseCase{}, time.Now)
+	h := NewHandlerWithClock(newFakeAuth("user-1", "dispatcher"), &fakeCreateRequestUseCase{}, getUC, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{}, time.Now)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/requests/req-1", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
@@ -334,7 +357,7 @@ func TestGetRequestSuccess(t *testing.T) {
 
 func TestRequestReturnValidationErrorMapping(t *testing.T) {
 	returnUC := &fakeRequestReturnUseCase{err: fmt.Errorf("wrapped: %w", domain.ErrRequiredField)}
-	h := NewHandlerWithClock(newFakeAuth("user-1", "dispatcher"), &fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, returnUC, time.Now)
+	h := NewHandlerWithClock(newFakeAuth("user-1", "technician"), &fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, returnUC, &fakeTransferResourceUseCase{}, time.Now)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/allocations/alloc-1/return-request",
 		strings.NewReader(`{"audit":{}}`))
@@ -354,6 +377,325 @@ func TestRequestReturnValidationErrorMapping(t *testing.T) {
 	}
 }
 
+func TestTransferResourceSuccess(t *testing.T) {
+	fixedNow := time.Date(2026, 7, 19, 9, 45, 0, 0, time.UTC)
+	transferUC := &fakeTransferResourceUseCase{}
+	h := NewHandlerWithClock(
+		newFakeAuth("dispatcher-1", "dispatcher"),
+		&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, transferUC,
+		func() time.Time { return fixedNow },
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/resources/res-1/transfer", strings.NewReader(`{"old_allocation_id":"alloc-old","new_allocation_id":"alloc-new","target_request_id":"req-target","planned_from":"2026-07-19T10:00:00Z","planned_until":"2026-07-19T12:00:00Z","audit":{"client_seq":7,"note":"handover"}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("X-Client-Occurred-At", "2026-07-19T09:40:00Z")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if transferUC.in.OldAllocationID != "alloc-old" {
+		t.Fatalf("old allocation id = %s, want alloc-old", transferUC.in.OldAllocationID)
+	}
+	if transferUC.in.NewAllocationID != "alloc-new" {
+		t.Fatalf("new allocation id = %s, want alloc-new", transferUC.in.NewAllocationID)
+	}
+	if transferUC.in.TargetRequestID != "req-target" {
+		t.Fatalf("target request id = %s, want req-target", transferUC.in.TargetRequestID)
+	}
+	if !transferUC.in.PlannedFrom.Equal(time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("planned_from = %v, want 2026-07-19T10:00:00Z", transferUC.in.PlannedFrom)
+	}
+	if !transferUC.in.PlannedUntil.Equal(time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("planned_until = %v, want 2026-07-19T12:00:00Z", transferUC.in.PlannedUntil)
+	}
+	if transferUC.in.At != fixedNow {
+		t.Fatalf("at = %v, want %v", transferUC.in.At, fixedNow)
+	}
+	if transferUC.in.Audit.ActorID != "dispatcher-1" {
+		t.Fatalf("audit actor id = %q, want dispatcher-1", transferUC.in.Audit.ActorID)
+	}
+	if transferUC.in.Audit.ActorRole != domain.ActorRoleDispatcher {
+		t.Fatalf("audit actor role = %q, want dispatcher", transferUC.in.Audit.ActorRole)
+	}
+	if transferUC.in.Audit.ClientSeq == nil || *transferUC.in.Audit.ClientSeq != 7 {
+		t.Fatalf("audit client_seq = %v, want 7", transferUC.in.Audit.ClientSeq)
+	}
+	if transferUC.in.Audit.Note != "handover" {
+		t.Fatalf("audit note = %q, want handover", transferUC.in.Audit.Note)
+	}
+	if transferUC.in.Audit.ClientOccurredAt == nil {
+		t.Fatal("client occurred at should be set from X-Client-Occurred-At header")
+	}
+	wantClientOccurredAt := time.Date(2026, 7, 19, 9, 40, 0, 0, time.UTC)
+	if !transferUC.in.Audit.ClientOccurredAt.Equal(wantClientOccurredAt) {
+		t.Fatalf("client occurred at = %v, want %v", transferUC.in.Audit.ClientOccurredAt, wantClientOccurredAt)
+	}
+}
+
+func TestTransferResourceBadRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "malformed json", body: `{"old_allocation_id":`},
+		{name: "actor_id in audit", body: `{"old_allocation_id":"alloc-old","new_allocation_id":"alloc-new","target_request_id":"req-target","planned_from":"2026-07-19T10:00:00Z","planned_until":"2026-07-19T12:00:00Z","audit":{"actor_id":"attacker"}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHandlerWithClock(
+				newFakeAuth("dispatcher-1", "dispatcher"),
+				&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{},
+				time.Now,
+			)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/resources/res-1/transfer", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer test-token")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+			errRes := decodeErrorResponse(t, rec)
+			if errRes.Error.Code != "bad_request" {
+				t.Fatalf("error.code = %q, want bad_request", errRes.Error.Code)
+			}
+		})
+	}
+}
+
+func TestTransferResourceUnauthorized(t *testing.T) {
+	body := `{"old_allocation_id":"alloc-old","new_allocation_id":"alloc-new","target_request_id":"req-target","planned_from":"2026-07-19T10:00:00Z","planned_until":"2026-07-19T12:00:00Z","audit":{}}`
+
+	t.Run("missing authorization header", func(t *testing.T) {
+		transferUC := &fakeTransferResourceUseCase{}
+		h := NewHandlerWithClock(
+			newFakeAuth("dispatcher-1", "dispatcher"),
+			&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, transferUC,
+			time.Now,
+		)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/resources/res-1/transfer", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		errRes := decodeErrorResponse(t, rec)
+		if errRes.Error.Code != "unauthenticated" {
+			t.Fatalf("error.code = %q, want unauthenticated", errRes.Error.Code)
+		}
+		if transferUC.in.OldAllocationID != "" {
+			t.Fatalf("use case should not be called, got old allocation id = %q", transferUC.in.OldAllocationID)
+		}
+	})
+
+	t.Run("invalid token", func(t *testing.T) {
+		transferUC := &fakeTransferResourceUseCase{}
+		h := NewHandlerWithClock(
+			&fakeAuthenticator{err: fmt.Errorf("invalid token: %w", ports.ErrUnauthenticated)},
+			&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, transferUC,
+			time.Now,
+		)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/resources/res-1/transfer", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer invalid")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		errRes := decodeErrorResponse(t, rec)
+		if errRes.Error.Code != "unauthenticated" {
+			t.Fatalf("error.code = %q, want unauthenticated", errRes.Error.Code)
+		}
+		if transferUC.in.OldAllocationID != "" {
+			t.Fatalf("use case should not be called, got old allocation id = %q", transferUC.in.OldAllocationID)
+		}
+	})
+}
+
+func TestTransferResourceForbiddenRole(t *testing.T) {
+	transferUC := &fakeTransferResourceUseCase{}
+	h := NewHandlerWithClock(
+		newFakeAuth("tech-1", "technician"),
+		&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, transferUC,
+		time.Now,
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/resources/res-1/transfer", strings.NewReader(`{"old_allocation_id":"alloc-old","new_allocation_id":"alloc-new","target_request_id":"req-target","planned_from":"2026-07-19T10:00:00Z","planned_until":"2026-07-19T12:00:00Z","audit":{}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	errRes := decodeErrorResponse(t, rec)
+	if errRes.Error.Code != "forbidden" {
+		t.Fatalf("error.code = %q, want forbidden", errRes.Error.Code)
+	}
+	if transferUC.in.OldAllocationID != "" {
+		t.Fatalf("use case should not be called, got old allocation id = %q", transferUC.in.OldAllocationID)
+	}
+}
+
+func TestTransferResourceErrorMapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "not_found", err: ports.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found"},
+		{name: "conflict", err: ports.ErrConflict, wantStatus: http.StatusConflict, wantCode: "conflict"},
+		{name: "already_completed", err: domain.ErrAlreadyCompleted, wantStatus: http.StatusConflict, wantCode: "conflict"},
+		{name: "validation", err: domain.ErrRequiredField, wantStatus: http.StatusUnprocessableEntity, wantCode: "validation_error"},
+	}
+
+	body := `{"old_allocation_id":"alloc-old","new_allocation_id":"alloc-new","target_request_id":"req-target","planned_from":"2026-07-19T10:00:00Z","planned_until":"2026-07-19T12:00:00Z","audit":{}}`
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transferUC := &fakeTransferResourceUseCase{err: fmt.Errorf("wrapped: %w", tt.err)}
+			h := NewHandlerWithClock(
+				newFakeAuth("dispatcher-1", "dispatcher"),
+				&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, transferUC,
+				time.Now,
+			)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/resources/res-1/transfer", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-token")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			errRes := decodeErrorResponse(t, rec)
+			if errRes.Error.Code != tt.wantCode {
+				t.Fatalf("error.code = %q, want %q", errRes.Error.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestHandleEventsStreamSuccess(t *testing.T) {
+	events := make(chan ports.Event, 1)
+	events <- ports.Event{
+		Type:         ports.EventTypeRequestCreated,
+		RequestID:    "req-1",
+		TechnicianID: "tech-1",
+		OccurredAt:   time.Now().UTC(),
+	}
+	close(events)
+
+	stream := &fakeEventStream{events: events}
+	h := NewHandlerWithEventStreamAndClock(
+		newFakeAuth("tech-1", "technician"),
+		&fakeCreateRequestUseCase{},
+		&fakeGetRequestUseCase{},
+		&fakeRequestReturnUseCase{},
+		&fakeTransferResourceUseCase{},
+		stream,
+		time.Now,
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content-type = %q, want text/event-stream", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("cache-control = %q, want no-cache", got)
+	}
+	if got := rec.Header().Get("Connection"); got != "keep-alive" {
+		t.Fatalf("connection = %q, want keep-alive", got)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: request.created") {
+		t.Fatalf("response body missing event type, body = %q", body)
+	}
+	if !strings.Contains(body, `"request_id":"req-1"`) {
+		t.Fatalf("response body missing request id, body = %q", body)
+	}
+
+	if stream.principal.UserID != "tech-1" {
+		t.Fatalf("stream principal user id = %q, want tech-1", stream.principal.UserID)
+	}
+	if stream.principal.Role != domain.ActorRoleTechnician {
+		t.Fatalf("stream principal role = %q, want technician", stream.principal.Role)
+	}
+	if !stream.unsubscribed {
+		t.Fatal("stream must be unsubscribed after handler returns")
+	}
+}
+
+func TestEventsAuthorizationMatrix(t *testing.T) {
+	tests := []struct {
+		name           string
+		role           string
+		wantStatus     int
+		wantCode       string
+		wantSubscribed bool
+	}{
+		{name: "technician allowed", role: "technician", wantStatus: http.StatusOK, wantSubscribed: true},
+		{name: "dispatcher allowed", role: "dispatcher", wantStatus: http.StatusOK, wantSubscribed: true},
+		{name: "admin forbidden", role: "admin", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantSubscribed: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make(chan ports.Event)
+			close(events)
+
+			stream := &fakeEventStream{events: events}
+			h := NewHandlerWithEventStreamAndClock(
+				newFakeAuth("user-1", tt.role),
+				&fakeCreateRequestUseCase{},
+				&fakeGetRequestUseCase{},
+				&fakeRequestReturnUseCase{},
+				&fakeTransferResourceUseCase{},
+				stream,
+				time.Now,
+			)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+			req.Header.Set("Authorization", "Bearer test-token")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+
+			subscribed := stream.principal.UserID != ""
+			if subscribed != tt.wantSubscribed {
+				t.Fatalf("subscribed = %v, want %v", subscribed, tt.wantSubscribed)
+			}
+
+			if tt.wantCode != "" {
+				e := decodeErrorResponse(t, rec)
+				if e.Error.Code != tt.wantCode {
+					t.Fatalf("error.code = %q, want %q", e.Error.Code, tt.wantCode)
+				}
+			}
+		})
+	}
+}
+
 func decodeErrorResponse(t *testing.T, rec *httptest.ResponseRecorder) responseError {
 	t.Helper()
 	var out responseError
@@ -361,4 +703,303 @@ func decodeErrorResponse(t *testing.T, rec *httptest.ResponseRecorder) responseE
 		t.Fatalf("decode error response: %v", err)
 	}
 	return out
+}
+
+// ── requireRoles Middleware Unit Tests ─────────────────────────────────────────
+
+// TestRequireRolesAllowedRole verifies that the inner handler is called exactly
+// once and that the Principal remains accessible in the context.
+func TestRequireRolesAllowedRole(t *testing.T) {
+	callCount := 0
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		p, ok := PrincipalFromContext(r.Context())
+		if !ok {
+			t.Error("principal must still be in context after requireRoles")
+		}
+		if p.Role != domain.ActorRoleTechnician {
+			t.Errorf("role = %q, want technician", p.Role)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := requireRoles(domain.ActorRoleTechnician)(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := context.WithValue(req.Context(), contextKey, &ports.Principal{
+		UserID: "tech-1",
+		Role:   domain.ActorRoleTechnician,
+	})
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req.WithContext(ctx))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if callCount != 1 {
+		t.Fatalf("inner handler called %d times, want 1", callCount)
+	}
+}
+
+// TestRequireRolesForbiddenRole verifies that a disallowed role receives 403,
+// the inner handler is NOT called, and the JSON error envelope is correct.
+func TestRequireRolesForbiddenRole(t *testing.T) {
+	called := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := requireRoles(domain.ActorRoleTechnician)(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := context.WithValue(req.Context(), contextKey, &ports.Principal{
+		UserID: "dispatcher-1",
+		Role:   domain.ActorRoleDispatcher,
+	})
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req.WithContext(ctx))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if called {
+		t.Fatal("inner handler must not be called when role is disallowed")
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", ct)
+	}
+	e := decodeErrorResponse(t, rec)
+	if e.Error.Code != "forbidden" {
+		t.Fatalf("error.code = %q, want forbidden", e.Error.Code)
+	}
+}
+
+// TestRequireRolesMissingPrincipal verifies that calling requireRoles without a
+// prior authentication step (no Principal in context) results in 500 — a loud
+// signal that the middleware chain is incorrectly wired. Must never return 403.
+func TestRequireRolesMissingPrincipal(t *testing.T) {
+	called := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := requireRoles(domain.ActorRoleTechnician)(inner)
+
+	// No principal injected — simulates programming error.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (programming error)", rec.Code)
+	}
+	if called {
+		t.Fatal("inner handler must not be called when principal is missing")
+	}
+	e := decodeErrorResponse(t, rec)
+	if e.Error.Code != "internal_error" {
+		t.Fatalf("error.code = %q, want internal_error", e.Error.Code)
+	}
+}
+
+// ── Per-Endpoint Authorization Matrix Tests ───────────────────────────────────
+
+// TestCreateRequest_AuthorizationMatrix covers the POST /api/v1/requests endpoint.
+func TestCreateRequest_AuthorizationMatrix(t *testing.T) {
+	body := `{"request_id":"req-auth","technician_id":"tech-1","requested_resource_classes":["rc-1"],"audit":{}}`
+
+	tests := []struct {
+		name       string
+		role       string
+		wantStatus int
+		wantCode   string
+		wantCalled bool
+	}{
+		{name: "technician allowed", role: "technician", wantStatus: http.StatusCreated, wantCalled: true},
+		{name: "dispatcher forbidden", role: "dispatcher", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
+		{name: "admin forbidden", role: "admin", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			createUC := &fakeCreateRequestUseCase{}
+			h := NewHandlerWithClock(
+				newFakeAuth("user-1", tt.role),
+				createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{},
+				time.Now,
+			)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/requests", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-token")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			called := createUC.in.RequestID != ""
+			if called != tt.wantCalled {
+				t.Fatalf("use case called = %v, want %v", called, tt.wantCalled)
+			}
+			if tt.wantCode != "" {
+				if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+					t.Fatalf("content-type = %q, want application/json", ct)
+				}
+				e := decodeErrorResponse(t, rec)
+				if e.Error.Code != tt.wantCode {
+					t.Fatalf("error.code = %q, want %q", e.Error.Code, tt.wantCode)
+				}
+			}
+		})
+	}
+}
+
+// TestGetRequest_AuthorizationMatrix covers the GET /api/v1/requests/{id} endpoint.
+func TestGetRequest_AuthorizationMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		role       string
+		wantStatus int
+		wantCode   string
+		wantCalled bool
+	}{
+		{name: "technician allowed", role: "technician", wantStatus: http.StatusOK, wantCalled: true},
+		{name: "dispatcher allowed", role: "dispatcher", wantStatus: http.StatusOK, wantCalled: true},
+		{name: "admin allowed", role: "admin", wantStatus: http.StatusOK, wantCalled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getUC := &fakeGetRequestUseCase{}
+			h := NewHandlerWithClock(
+				newFakeAuth("user-1", tt.role),
+				&fakeCreateRequestUseCase{}, getUC, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{},
+				time.Now,
+			)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/requests/req-1", nil)
+			req.Header.Set("Authorization", "Bearer test-token")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			called := getUC.requestID != ""
+			if called != tt.wantCalled {
+				t.Fatalf("use case called = %v, want %v", called, tt.wantCalled)
+			}
+			if tt.wantCode != "" {
+				if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+					t.Fatalf("content-type = %q, want application/json", ct)
+				}
+				e := decodeErrorResponse(t, rec)
+				if e.Error.Code != tt.wantCode {
+					t.Fatalf("error.code = %q, want %q", e.Error.Code, tt.wantCode)
+				}
+			}
+		})
+	}
+}
+
+// TestRequestReturn_AuthorizationMatrix covers POST /api/v1/allocations/{id}/return-request.
+func TestRequestReturn_AuthorizationMatrix(t *testing.T) {
+	body := `{"audit":{}}`
+
+	tests := []struct {
+		name       string
+		role       string
+		wantStatus int
+		wantCode   string
+		wantCalled bool
+	}{
+		{name: "technician allowed", role: "technician", wantStatus: http.StatusNoContent, wantCalled: true},
+		{name: "dispatcher forbidden", role: "dispatcher", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
+		{name: "admin forbidden", role: "admin", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			returnUC := &fakeRequestReturnUseCase{}
+			h := NewHandlerWithClock(
+				newFakeAuth("user-1", tt.role),
+				&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, returnUC, &fakeTransferResourceUseCase{},
+				time.Now,
+			)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/allocations/alloc-1/return-request", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-token")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			called := returnUC.in.AllocationID != ""
+			if called != tt.wantCalled {
+				t.Fatalf("use case called = %v, want %v", called, tt.wantCalled)
+			}
+			if tt.wantCode != "" {
+				if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+					t.Fatalf("content-type = %q, want application/json", ct)
+				}
+				e := decodeErrorResponse(t, rec)
+				if e.Error.Code != tt.wantCode {
+					t.Fatalf("error.code = %q, want %q", e.Error.Code, tt.wantCode)
+				}
+			}
+		})
+	}
+}
+
+// TestTransferResource_AuthorizationMatrix covers POST /api/v1/resources/{id}/transfer.
+func TestTransferResource_AuthorizationMatrix(t *testing.T) {
+	body := `{"old_allocation_id":"alloc-old","new_allocation_id":"alloc-new","target_request_id":"req-target","planned_from":"2026-07-19T10:00:00Z","planned_until":"2026-07-19T12:00:00Z","audit":{}}`
+
+	tests := []struct {
+		name       string
+		role       string
+		wantStatus int
+		wantCode   string
+		wantCalled bool
+	}{
+		{name: "dispatcher allowed", role: "dispatcher", wantStatus: http.StatusNoContent, wantCalled: true},
+		{name: "technician forbidden", role: "technician", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
+		{name: "admin forbidden", role: "admin", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transferUC := &fakeTransferResourceUseCase{}
+			h := NewHandlerWithClock(
+				newFakeAuth("user-1", tt.role),
+				&fakeCreateRequestUseCase{}, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, transferUC,
+				time.Now,
+			)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/resources/res-1/transfer", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-token")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			called := transferUC.in.OldAllocationID != ""
+			if called != tt.wantCalled {
+				t.Fatalf("use case called = %v, want %v", called, tt.wantCalled)
+			}
+			if tt.wantCode != "" {
+				if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+					t.Fatalf("content-type = %q, want application/json", ct)
+				}
+				e := decodeErrorResponse(t, rec)
+				if e.Error.Code != tt.wantCode {
+					t.Fatalf("error.code = %q, want %q", e.Error.Code, tt.wantCode)
+				}
+			}
+		})
+	}
 }

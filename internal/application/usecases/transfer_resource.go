@@ -25,12 +25,19 @@ type TransferResourceInput struct {
 // TransferResourceUseCase performs a direct site-to-site resource transfer within a
 // single atomic transaction. Transaction lock order: Request → Allocation → Resource.
 type TransferResourceUseCase struct {
-	uow ports.UnitOfWork
+	uow            ports.UnitOfWork
+	eventPublisher ports.EventPublisher
 }
 
 // NewTransferResourceUseCase creates a TransferResourceUseCase.
 func NewTransferResourceUseCase(uow ports.UnitOfWork) *TransferResourceUseCase {
-	return &TransferResourceUseCase{uow: uow}
+	return NewTransferResourceUseCaseWithPublisher(uow, nil)
+}
+
+// NewTransferResourceUseCaseWithPublisher creates a TransferResourceUseCase with
+// outbound event publishing.
+func NewTransferResourceUseCaseWithPublisher(uow ports.UnitOfWork, eventPublisher ports.EventPublisher) *TransferResourceUseCase {
+	return &TransferResourceUseCase{uow: uow, eventPublisher: withEventPublisher(eventPublisher)}
 }
 
 // Execute runs the transactional direct-transfer flow.
@@ -58,7 +65,8 @@ func (uc *TransferResourceUseCase) Execute(ctx context.Context, in TransferResou
 		return err
 	}
 
-	return uc.uow.WithinTransaction(ctx, func(ctx context.Context, tx ports.Transaction) error {
+	var streamEvents []ports.Event
+	err := uc.uow.WithinTransaction(ctx, func(ctx context.Context, tx ports.Transaction) error {
 		// ── Phase 1: acquire all locks and run all guards (nothing saved yet) ────
 
 		// Lock order step 1: target request
@@ -85,6 +93,14 @@ func (uc *TransferResourceUseCase) Execute(ctx context.Context, in TransferResou
 		if oldAlloc.RequestID == in.TargetRequestID {
 			return fmt.Errorf("source and target request are identical (%s): %w",
 				in.TargetRequestID, domain.ErrInvalidState)
+		}
+
+		sourceReq, err := tx.Requests().GetByID(ctx, oldAlloc.RequestID)
+		if err != nil {
+			return fmt.Errorf("load source request %s: %w", oldAlloc.RequestID, err)
+		}
+		if sourceReq == nil {
+			return fmt.Errorf("source request %s: %w", oldAlloc.RequestID, ports.ErrNotFound)
 		}
 
 		// Lock order step 3: resource (block guard — checked before any saves)
@@ -171,6 +187,36 @@ func (uc *TransferResourceUseCase) Execute(ctx context.Context, in TransferResou
 			return fmt.Errorf("write audit for new allocation %s: %w", in.NewAllocationID, err)
 		}
 
+		streamEvents = []ports.Event{
+			{
+				Type:         ports.EventTypeAllocationDirectTransferCompleted,
+				RequestID:    oldAlloc.RequestID,
+				AllocationID: oldAlloc.ID,
+				ResourceID:   oldAlloc.ResourceID,
+				TechnicianID: sourceReq.TechnicianID,
+				OccurredAt:   in.At,
+			},
+			{
+				Type:         ports.EventTypeAllocationDirectTransferActivated,
+				RequestID:    newAlloc.RequestID,
+				AllocationID: newAlloc.ID,
+				ResourceID:   newAlloc.ResourceID,
+				TechnicianID: targetReq.TechnicianID,
+				OccurredAt:   in.At,
+			},
+		}
+
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	for _, event := range streamEvents {
+		if err := uc.eventPublisher.Publish(ctx, event); err != nil {
+			return fmt.Errorf("publish transfer event for allocation %s: %w", event.AllocationID, err)
+		}
+	}
+
+	return nil
 }

@@ -5,7 +5,7 @@ CREATE TABLE users (
     is_active boolean NOT NULL DEFAULT true,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT chk_users_role_valid CHECK (role IN ('technician', 'elz', 'admin'))
+    CONSTRAINT chk_users_role_valid CHECK (role IN ('technician', 'dispatcher', 'admin'))
 );
 
 CREATE TABLE resource_classes (

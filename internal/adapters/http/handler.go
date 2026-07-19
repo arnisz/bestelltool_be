@@ -35,6 +35,16 @@ type RequestReturnUseCase interface {
 	Execute(ctx context.Context, in usecases.RequestReturnInput) error
 }
 
+// TransferResourceUseCase is the inbound port for direct resource transfer.
+type TransferResourceUseCase interface {
+	Execute(ctx context.Context, in usecases.TransferResourceInput) error
+}
+
+// EventStream is the local narrow contract for SSE subscriptions.
+type EventStream interface {
+	Subscribe(principal ports.Principal) (<-chan ports.Event, func())
+}
+
 // contextKeyType is an unexported type for context keys to avoid collisions.
 type contextKeyType struct{}
 
@@ -47,10 +57,12 @@ func PrincipalFromContext(ctx context.Context) (*ports.Principal, bool) {
 }
 
 type handler struct {
-	createRequest CreateRequestUseCase
-	getRequest    GetRequestUseCase
-	requestReturn RequestReturnUseCase
-	now           func() time.Time
+	createRequest    CreateRequestUseCase
+	getRequest       GetRequestUseCase
+	requestReturn    RequestReturnUseCase
+	transferResource TransferResourceUseCase
+	eventStream      EventStream
+	now              func() time.Time
 }
 
 type createRequestPayload struct {
@@ -69,6 +81,16 @@ type createRequestPayload struct {
 type requestReturnPayload struct {
 	At    *time.Time   `json:"at,omitzero"`
 	Audit auditPayload `json:"audit"`
+}
+
+type transferResourcePayload struct {
+	OldAllocationID string       `json:"old_allocation_id"`
+	NewAllocationID string       `json:"new_allocation_id"`
+	TargetRequestID string       `json:"target_request_id"`
+	PlannedFrom     time.Time    `json:"planned_from"`
+	PlannedUntil    time.Time    `json:"planned_until"`
+	At              *time.Time   `json:"at,omitzero"`
+	Audit           auditPayload `json:"audit"`
 }
 
 // auditPayload carries only client-side timing metadata.
@@ -114,19 +136,46 @@ func NewHandler(
 	createRequest CreateRequestUseCase,
 	getRequest GetRequestUseCase,
 	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
 ) http.Handler {
-	return NewHandlerWithClock(auth, createRequest, getRequest, requestReturn, time.Now)
+	return NewHandlerWithClock(auth, createRequest, getRequest, requestReturn, transferResource, time.Now)
+}
+
+// NewHandlerWithEventStream builds the HTTP adapter and wires SSE streaming.
+func NewHandlerWithEventStream(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	eventStream EventStream,
+) http.Handler {
+	return NewHandlerWithEventStreamAndClock(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now)
 }
 
 // NewHandlerWithClock builds the HTTP adapter and allows deterministic tests.
-// All /api/v1/* routes are protected by the auth middleware.
-// Unprotected routes (e.g. GET /health) must be registered on the outer mux in
-// main.go after calling NewHandler — they are intentionally outside this function.
+// All /api/v1/* routes are protected by the auth middleware followed by per-route
+// role checks via requireRoles. Unprotected routes (e.g. GET /health) must be
+// registered on the outer mux in main.go — they are intentionally outside this function.
 func NewHandlerWithClock(
 	auth Authenticator,
 	createRequest CreateRequestUseCase,
 	getRequest GetRequestUseCase,
 	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	now func() time.Time,
+) http.Handler {
+	return NewHandlerWithEventStreamAndClock(auth, createRequest, getRequest, requestReturn, transferResource, nil, now)
+}
+
+// NewHandlerWithEventStreamAndClock builds the HTTP adapter and allows deterministic tests.
+func NewHandlerWithEventStreamAndClock(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	eventStream EventStream,
 	now func() time.Time,
 ) http.Handler {
 	if now == nil {
@@ -134,17 +183,37 @@ func NewHandlerWithClock(
 	}
 
 	h := &handler{
-		createRequest: createRequest,
-		getRequest:    getRequest,
-		requestReturn: requestReturn,
-		now:           now,
+		createRequest:    createRequest,
+		getRequest:       getRequest,
+		requestReturn:    requestReturn,
+		transferResource: transferResource,
+		eventStream:      eventStream,
+		now:              now,
 	}
 
-	// Inner mux: specific method+path routes, always reached after auth.
+	// Inner mux: each route carries an explicit role allowlist via requireRoles.
+	// Order: authMiddleware → requireRoles → handler.
 	protected := http.NewServeMux()
-	protected.HandleFunc("POST /api/v1/requests", h.handleCreateRequest)
-	protected.HandleFunc("GET /api/v1/requests/{id}", h.handleGetRequest)
-	protected.HandleFunc("POST /api/v1/allocations/{id}/return-request", h.handleRequestReturn)
+	protected.Handle("POST /api/v1/requests",
+		requireRoles(domain.ActorRoleTechnician)(
+			http.HandlerFunc(h.handleCreateRequest),
+		))
+	protected.Handle("GET /api/v1/requests/{id}",
+		requireRoles(domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleAdmin)(
+			http.HandlerFunc(h.handleGetRequest),
+		))
+	protected.Handle("POST /api/v1/allocations/{id}/return-request",
+		requireRoles(domain.ActorRoleTechnician)(
+			http.HandlerFunc(h.handleRequestReturn),
+		))
+	protected.Handle("POST /api/v1/resources/{id}/transfer",
+		requireRoles(domain.ActorRoleDispatcher)(
+			http.HandlerFunc(h.handleTransferResource),
+		))
+	protected.Handle("GET /api/v1/events",
+		requireRoles(domain.ActorRoleDispatcher, domain.ActorRoleTechnician)(
+			http.HandlerFunc(h.handleEvents),
+		))
 
 	// Outer mux: /api/v1/ subtree is auth-guarded.
 	// Add unprotected routes (health checks, etc.) directly to this mux in main.go.
@@ -152,6 +221,32 @@ func NewHandlerWithClock(
 	mux.Handle("/api/v1/", authMiddleware(auth, protected))
 
 	return mux
+}
+
+// requireRoles returns a middleware that enforces one of the allowed roles on the
+// authenticated Principal. MUST be applied after authMiddleware.
+//
+//   - Missing Principal → 500 (programming error — middleware chain incorrectly wired).
+//   - Correct role → next handler is called with the unchanged context.
+//   - Wrong role → 403 Forbidden.
+func requireRoles(allowed ...domain.ActorRole) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, ok := PrincipalFromContext(r.Context())
+			if !ok {
+				// Programming error: auth middleware was bypassed.
+				writeMappedError(w, fmt.Errorf("principal not in context: programming error"))
+				return
+			}
+			for _, role := range allowed {
+				if p.Role == role {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			writeMappedError(w, ports.ErrForbidden)
+		})
+	}
 }
 
 // authMiddleware extracts and validates the Bearer token, stores the Principal in
@@ -277,6 +372,116 @@ func (h *handler) handleRequestReturn(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *handler) handleTransferResource(w http.ResponseWriter, r *http.Request) {
+	if h.transferResource == nil {
+		writeMappedError(w, fmt.Errorf("transfer resource use case missing"))
+		return
+	}
+
+	resourceID := domain.ResourceID(r.PathValue("id"))
+	if resourceID == "" {
+		writeMappedError(w, fmt.Errorf("resource id: %w", domain.ErrRequiredField))
+		return
+	}
+
+	var payload transferResourcePayload
+	if err := decodeJSONBody(r, &payload); err != nil {
+		writeBadRequest(w)
+		return
+	}
+
+	audit, err := buildAuditMeta(r, payload.Audit)
+	if err != nil {
+		writeMappedError(w, err)
+		return
+	}
+
+	at := h.now().UTC()
+	if payload.At != nil {
+		at = payload.At.UTC()
+	}
+
+	err = h.transferResource.Execute(r.Context(), usecases.TransferResourceInput{
+		OldAllocationID: domain.AllocationID(payload.OldAllocationID),
+		NewAllocationID: domain.AllocationID(payload.NewAllocationID),
+		TargetRequestID: domain.RequestID(payload.TargetRequestID),
+		PlannedFrom:     payload.PlannedFrom.UTC(),
+		PlannedUntil:    payload.PlannedUntil.UTC(),
+		At:              at,
+		Audit:           audit,
+	})
+	if err != nil {
+		writeMappedError(w, fmt.Errorf("transfer resource %s: %w", resourceID, err))
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if h.eventStream == nil {
+		writeMappedError(w, fmt.Errorf("event stream missing"))
+		return
+	}
+
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		writeMappedError(w, fmt.Errorf("principal not in context: programming error"))
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeMappedError(w, fmt.Errorf("streaming unsupported"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	events, unsubscribe := h.eventStream.Subscribe(*principal)
+	defer unsubscribe()
+
+	if _, err := io.WriteString(w, ": connected\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, streamOpen := <-events:
+			if !streamOpen {
+				return
+			}
+
+			if err := writeSSEEvent(w, event); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func writeSSEEvent(w io.Writer, event ports.Event) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+
+	if _, err := fmt.Fprintf(w, "event: %s\n", event.Type); err != nil {
+		return fmt.Errorf("write event type: %w", err)
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+		return fmt.Errorf("write event payload: %w", err)
+	}
+
+	return nil
+}
+
 // buildAuditMeta constructs AuditMeta exclusively from the authenticated Principal
 // in the request context, plus optional client-side timing metadata.
 //
@@ -375,6 +580,8 @@ func mapHTTPError(err error) (int, string, string) {
 	switch {
 	case errors.Is(err, ports.ErrUnauthenticated):
 		return http.StatusUnauthorized, "unauthenticated", "invalid or missing credentials"
+	case errors.Is(err, ports.ErrForbidden):
+		return http.StatusForbidden, "forbidden", "forbidden"
 	case errors.Is(err, ports.ErrNotFound):
 		return http.StatusNotFound, "not_found", "resource not found"
 	case errors.Is(err, ports.ErrConflict),

@@ -32,8 +32,8 @@ The project uses a strict Hexagonal Architecture. Do not violate these boundarie
     *   An audit event requires two timestamps: `ClientOccurredAt` (nullable, from offline client) and `ServerRecordedAt` (authoritative, database time).
     *   Use `newAuditEvent(meta, entityType, entityID, action, fromStatus, toStatus)` from `usecases/common.go`.
     *   Always call `validateAuditMeta(meta)` before use — it enforces non-empty `ActorID` and `ActorRole`.
-*   **Row-Level Locking**: When the ELZ (Dispatcher) allocates a resource, use explicit row-locks (`SELECT ... FOR UPDATE`) to prevent concurrent assignment conflicts.
-*   **Optimistic Locking**: Offline-sync actions use a `version` field for optimistic concurrency control ("ELZ/Dispatcher wins" policy).
+*   **Row-Level Locking**: When the Dispatcher allocates a resource, use explicit row-locks (`SELECT ... FOR UPDATE`) to prevent concurrent assignment conflicts.
+*   **Optimistic Locking**: Offline-sync actions use a `version` field for optimistic concurrency control ("Dispatcher wins" policy).
 
 ### Error Sentinels
 Two separate packages define sentinel errors — both must be mapped in `mapHTTPError` (`internal/adapters/http/handler.go`):
@@ -122,6 +122,19 @@ TEST_DATABASE_URL="postgres://user:pass@host/dbname" go test -count=1 ./internal
 1. Define use case input/output structs and implement logic in `internal/application/usecases/`.
 2. Add a local narrow interface in `internal/adapters/http/handler.go` (e.g., `type MyUseCase interface { Execute(...) }`).
 3. Add a field to the `handler` struct and update `NewHandler()` / `NewHandlerWithClock()`.
-4. Register the route on the **`protected` inner mux** in `NewHandlerWithClock()` via `protected.HandleFunc("METHOD /api/v1/...", h.handleX)`. Unprotected routes (health checks) go on the outer `mux` in `main.go`.
+4. Register the route on the **`protected` inner mux** in `NewHandlerWithClock()` with an **explicit `requireRoles(...)` call**:
+   ```go
+   protected.Handle("METHOD /api/v1/...", requireRoles(domain.ActorRoleXxx)(http.HandlerFunc(h.handleX)))
+   ```
+   No route may be registered on the protected mux without a `requireRoles` wrapper. Failing to do so leaves the endpoint open to any authenticated role.
 5. Wire the concrete use case into `cmd/server/main.go` (composition root).
 6. Add handler tests using `httptest.NewRecorder` and in-package fake structs (see `handler_test.go`). All test requests for protected routes must include `Authorization: Bearer <token>` and a `fakeAuthenticator`.
+
+### Authorization Rules (Strict!)
+*   **Every protected route must have an explicit role allowlist** at the point of registration via `requireRoles(...)`.
+*   **Middleware order is strictly: Authentication → `requireRoles` → Handler.** Never swap this order.
+*   Missing or invalid token → **401 Unauthorized** (authentication layer). A disallowed role → **403 Forbidden** (role check). A missing Principal inside a handler → **500** (programming error, not 401 or 403).
+*   The role check reads exclusively from `PrincipalFromContext`; it never inspects body fields, query parameters, or headers.
+*   Actor identity for AuditEvents continues to come exclusively from the Principal — the `auditPayload` struct must never contain `actor_id` or `actor_role`.
+*   Canonical role constants: `domain.ActorRoleTechnician`, `domain.ActorRoleDispatcher`, `domain.ActorRoleAdmin`, `domain.ActorRoleSystem`. Use these constants everywhere — no raw string literals.
+

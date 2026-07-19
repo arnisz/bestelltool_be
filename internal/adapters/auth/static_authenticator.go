@@ -23,7 +23,7 @@ type StaticTokenAuthenticator struct {
 // StaticTokenAuthenticator. Any parse or validation error is a startup failure.
 //
 // Format: "token:user-id:role,token2:user-id2:role2"
-// Valid roles: technician, dispatcher, system.
+// Valid roles: technician, dispatcher, admin, system.
 func ParseStaticTokens(raw string) (*StaticTokenAuthenticator, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, fmt.Errorf("AUTH_STATIC_TOKENS is required")
@@ -47,7 +47,7 @@ func ParseStaticTokens(raw string) (*StaticTokenAuthenticator, error) {
 		}
 		role := domain.ActorRole(roleStr)
 		switch role {
-		case domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleSystem:
+		case domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleAdmin, domain.ActorRoleSystem:
 		default:
 			return nil, fmt.Errorf("invalid role %q in token entry %q", roleStr, entry)
 		}

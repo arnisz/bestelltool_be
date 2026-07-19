@@ -36,9 +36,23 @@ func TestParseStaticTokens_Valid(t *testing.T) {
 }
 
 func TestParseStaticTokens_AllRoles(t *testing.T) {
-	_, err := ParseStaticTokens("t1:u1:dispatcher,t2:u2:technician,t3:u3:system")
+	_, err := ParseStaticTokens("t1:u1:dispatcher,t2:u2:technician,t3:u3:system,t4:u4:admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseStaticTokens_AdminRoleValid(t *testing.T) {
+	a, err := ParseStaticTokens("tok-admin:admin-user:admin")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p, err := a.Authenticate(context.Background(), "tok-admin")
+	if err != nil {
+		t.Fatalf("Authenticate error = %v", err)
+	}
+	if p.Role != domain.ActorRoleAdmin {
+		t.Fatalf("role = %q, want admin", p.Role)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	authadapter "bestelltool_be/internal/adapters/auth"
 	httpadapter "bestelltool_be/internal/adapters/http"
 	"bestelltool_be/internal/adapters/postgres"
+	"bestelltool_be/internal/adapters/sse"
 	"bestelltool_be/internal/application/usecases"
 )
 
@@ -25,6 +26,11 @@ func run() error {
 	cfg, err := loadConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	if cfg.RunMigrations {
+		if err := postgres.RunEmbeddedMigrations(context.Background(), cfg.DatabaseURL); err != nil {
+			return fmt.Errorf("run embedded migrations: %w", err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -43,12 +49,15 @@ func run() error {
 
 	uow := postgres.NewUnitOfWork(pool)
 	requestRepo := postgres.NewRequestRepository(pool)
+	eventStream := sse.NewBroker(0)
 
-	handler := httpadapter.NewHandler(
+	handler := httpadapter.NewHandlerWithEventStream(
 		authenticator,
-		usecases.NewCreateRequestUseCase(uow),
+		usecases.NewCreateRequestUseCaseWithPublisher(uow, eventStream),
 		usecases.NewGetRequestUseCase(requestRepo),
-		usecases.NewRequestReturnUseCase(uow),
+		usecases.NewRequestReturnUseCaseWithPublisher(uow, eventStream),
+		usecases.NewTransferResourceUseCaseWithPublisher(uow, eventStream),
+		eventStream,
 	)
 
 	srv := &http.Server{

@@ -8,8 +8,12 @@ type ActorRole string
 const (
 	// ActorRoleTechnician identifies technician actors.
 	ActorRoleTechnician ActorRole = "technician"
-	// ActorRoleDispatcher identifies dispatch actors.
+	// ActorRoleDispatcher identifies Dispatcher actors.
+	// Both the domain layer and the database use the canonical value "dispatcher".
 	ActorRoleDispatcher ActorRole = "dispatcher"
+	// ActorRoleAdmin identifies admin actors.
+	// Admin may only perform read-only operations; write operations require technician or dispatcher.
+	ActorRoleAdmin ActorRole = "admin"
 	// ActorRoleSystem identifies system actors.
 	ActorRoleSystem ActorRole = "system"
 )

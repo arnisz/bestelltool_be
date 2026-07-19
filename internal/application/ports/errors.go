@@ -11,4 +11,6 @@ var (
 	ErrValidation = errors.New("validation")
 	// ErrUnauthenticated signals a missing or invalid authentication credential.
 	ErrUnauthenticated = errors.New("unauthenticated")
+	// ErrForbidden signals that an authenticated principal lacks the required role.
+	ErrForbidden = errors.New("forbidden")
 )

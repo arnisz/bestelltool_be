@@ -169,6 +169,9 @@ func TestRequestReturnExecuteSuccess(t *testing.T) {
 
 	allocation := mustAllocationInWithTechnicianState(t)
 	tx.allocations.items[allocation.ID] = allocation
+	req := mustRequest(t)
+	req.ID = allocation.RequestID
+	tx.requests.items[req.ID] = req
 
 	err := uc.Execute(t.Context(), RequestReturnInput{
 		AllocationID: allocation.ID,

@@ -58,11 +58,6 @@ type IdempotencyStore interface {
 	Save(ctx context.Context, actionID string, result IdempotencyResult) error
 }
 
-// EventPublisher is an optional outbound event port.
-type EventPublisher interface {
-	Publish(ctx context.Context, event any) error
-}
-
 // Transaction provides transaction-bound repositories and writers.
 type Transaction interface {
 	Requests() RequestRepository

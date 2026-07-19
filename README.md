@@ -34,6 +34,10 @@ Not yet implemented:
 
 The current version therefore does not yet provide a production-ready server.
 
+## Deployment Strategy
+
+For verbindliche Regeln zu automatischen Datenbankmigrationen beim Serverstart (`RUN_MIGRATIONS`) siehe `docs/deployment.md`.
+
 ## Core Features
 
 The planned system includes:

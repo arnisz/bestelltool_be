@@ -25,12 +25,19 @@ type CreateRequestInput struct {
 
 // CreateRequestUseCase creates a new request and writes an audit event transactionally.
 type CreateRequestUseCase struct {
-	uow ports.UnitOfWork
+	uow            ports.UnitOfWork
+	eventPublisher ports.EventPublisher
 }
 
 // NewCreateRequestUseCase creates a CreateRequestUseCase.
 func NewCreateRequestUseCase(uow ports.UnitOfWork) *CreateRequestUseCase {
-	return &CreateRequestUseCase{uow: uow}
+	return NewCreateRequestUseCaseWithPublisher(uow, nil)
+}
+
+// NewCreateRequestUseCaseWithPublisher creates a CreateRequestUseCase with
+// outbound event publishing.
+func NewCreateRequestUseCaseWithPublisher(uow ports.UnitOfWork, eventPublisher ports.EventPublisher) *CreateRequestUseCase {
+	return &CreateRequestUseCase{uow: uow, eventPublisher: withEventPublisher(eventPublisher)}
 }
 
 // Execute runs the transactional request-creation flow.
@@ -78,6 +85,15 @@ func (uc *CreateRequestUseCase) Execute(ctx context.Context, in CreateRequestInp
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if err := uc.eventPublisher.Publish(ctx, ports.Event{
+		Type:         ports.EventTypeRequestCreated,
+		RequestID:    req.ID,
+		TechnicianID: req.TechnicianID,
+		OccurredAt:   req.CreatedAt,
+	}); err != nil {
+		return nil, fmt.Errorf("publish request created event %s: %w", req.ID, err)
 	}
 
 	return req, nil
