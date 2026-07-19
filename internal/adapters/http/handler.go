@@ -440,6 +440,7 @@ func (h *handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	events, unsubscribe := h.eventStream.Subscribe(*principal)
 	defer unsubscribe()

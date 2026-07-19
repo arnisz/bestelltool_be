@@ -92,6 +92,53 @@ func (f *fakeEventStream) Subscribe(principal ports.Principal) (<-chan ports.Eve
 	}
 }
 
+type blockingEventStream struct {
+	entered chan struct{}
+	release <-chan struct{}
+	events  <-chan ports.Event
+}
+
+func (f *blockingEventStream) Subscribe(_ ports.Principal) (<-chan ports.Event, func()) {
+	close(f.entered)
+	<-f.release
+	return f.events, func() {}
+}
+
+type flushSignalWriter struct {
+	header  http.Header
+	status  int
+	flushed chan struct{}
+}
+
+func newFlushSignalWriter() *flushSignalWriter {
+	return &flushSignalWriter{
+		header:  make(http.Header),
+		flushed: make(chan struct{}, 1),
+	}
+}
+
+func (w *flushSignalWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *flushSignalWriter) WriteHeader(statusCode int) {
+	w.status = statusCode
+}
+
+func (w *flushSignalWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return len(p), nil
+}
+
+func (w *flushSignalWriter) Flush() {
+	select {
+	case w.flushed <- struct{}{}:
+	default:
+	}
+}
+
 type responseError struct {
 	Error struct {
 		Code    string `json:"code"`
@@ -640,6 +687,64 @@ func TestHandleEventsStreamSuccess(t *testing.T) {
 	}
 	if !stream.unsubscribed {
 		t.Fatal("stream must be unsubscribed after handler returns")
+	}
+}
+
+func TestHandleEventsFlushesBeforeSubscribeReturns(t *testing.T) {
+	events := make(chan ports.Event)
+	close(events)
+
+	release := make(chan struct{}, 1)
+	stream := &blockingEventStream{
+		entered: make(chan struct{}),
+		release: release,
+		events:  events,
+	}
+	h := NewHandlerWithEventStreamAndClock(
+		newFakeAuth("dispatcher-1", "dispatcher"),
+		&fakeCreateRequestUseCase{},
+		&fakeGetRequestUseCase{},
+		&fakeRequestReturnUseCase{},
+		&fakeTransferResourceUseCase{},
+		stream,
+		time.Now,
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	writer := newFlushSignalWriter()
+
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(writer, req)
+		close(done)
+	}()
+	defer func() {
+		select {
+		case release <- struct{}{}:
+		default:
+		}
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("handler did not return after subscribe release")
+		}
+	}()
+
+	select {
+	case <-stream.entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not call subscribe")
+	}
+
+	select {
+	case <-writer.flushed:
+	case <-time.After(time.Second):
+		t.Fatal("expected SSE stream to flush response before subscribe returns")
+	}
+
+	if writer.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", writer.status)
 	}
 }
 
