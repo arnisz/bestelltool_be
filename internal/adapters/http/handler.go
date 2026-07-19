@@ -7,12 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"bestelltool_be/internal/application/ports"
 	"bestelltool_be/internal/application/usecases"
 	"bestelltool_be/internal/domain"
 )
+
+// Authenticator is the narrow local port for token verification.
+type Authenticator interface {
+	Authenticate(ctx context.Context, token string) (*ports.Principal, error)
+}
 
 // CreateRequestUseCase is the inbound port for creating requests.
 type CreateRequestUseCase interface {
@@ -27,6 +33,17 @@ type GetRequestUseCase interface {
 // RequestReturnUseCase is the inbound port for requesting allocation return.
 type RequestReturnUseCase interface {
 	Execute(ctx context.Context, in usecases.RequestReturnInput) error
+}
+
+// contextKeyType is an unexported type for context keys to avoid collisions.
+type contextKeyType struct{}
+
+var contextKey = contextKeyType{}
+
+// PrincipalFromContext retrieves the authenticated principal from the context.
+func PrincipalFromContext(ctx context.Context) (*ports.Principal, bool) {
+	p, ok := ctx.Value(contextKey).(*ports.Principal)
+	return p, ok
 }
 
 type handler struct {
@@ -54,9 +71,12 @@ type requestReturnPayload struct {
 	Audit auditPayload `json:"audit"`
 }
 
+// auditPayload carries only client-side timing metadata.
+// Actor identity fields (actor_id, actor_role) are intentionally absent — they are
+// derived exclusively from the authenticated Principal in the request context.
+// Any body field named actor_id or actor_role will be rejected with 400 by
+// decodeJSONBody (DisallowUnknownFields).
 type auditPayload struct {
-	ActorID          string     `json:"actor_id"`
-	ActorRole        string     `json:"actor_role"`
 	ClientOccurredAt *time.Time `json:"client_occurred_at,omitzero"`
 	ClientSeq        *int64     `json:"client_seq,omitzero"`
 	Note             string     `json:"note"`
@@ -89,12 +109,21 @@ type errorBody struct {
 }
 
 // NewHandler builds the HTTP adapter using Go 1.22 method-pattern routes.
-func NewHandler(createRequest CreateRequestUseCase, getRequest GetRequestUseCase, requestReturn RequestReturnUseCase) http.Handler {
-	return NewHandlerWithClock(createRequest, getRequest, requestReturn, time.Now)
+func NewHandler(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+) http.Handler {
+	return NewHandlerWithClock(auth, createRequest, getRequest, requestReturn, time.Now)
 }
 
 // NewHandlerWithClock builds the HTTP adapter and allows deterministic tests.
+// All /api/v1/* routes are protected by the auth middleware.
+// Unprotected routes (e.g. GET /health) must be registered on the outer mux in
+// main.go after calling NewHandler — they are intentionally outside this function.
 func NewHandlerWithClock(
+	auth Authenticator,
 	createRequest CreateRequestUseCase,
 	getRequest GetRequestUseCase,
 	requestReturn RequestReturnUseCase,
@@ -111,12 +140,45 @@ func NewHandlerWithClock(
 		now:           now,
 	}
 
+	// Inner mux: specific method+path routes, always reached after auth.
+	protected := http.NewServeMux()
+	protected.HandleFunc("POST /api/v1/requests", h.handleCreateRequest)
+	protected.HandleFunc("GET /api/v1/requests/{id}", h.handleGetRequest)
+	protected.HandleFunc("POST /api/v1/allocations/{id}/return-request", h.handleRequestReturn)
+
+	// Outer mux: /api/v1/ subtree is auth-guarded.
+	// Add unprotected routes (health checks, etc.) directly to this mux in main.go.
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/requests", h.handleCreateRequest)
-	mux.HandleFunc("GET /api/v1/requests/{id}", h.handleGetRequest)
-	mux.HandleFunc("POST /api/v1/allocations/{id}/return-request", h.handleRequestReturn)
+	mux.Handle("/api/v1/", authMiddleware(auth, protected))
 
 	return mux
+}
+
+// authMiddleware extracts and validates the Bearer token, stores the Principal in
+// the request context, and rejects missing or invalid credentials with 401.
+func authMiddleware(auth Authenticator, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const prefix = "Bearer "
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, prefix) {
+			writeJSON(w, http.StatusUnauthorized, errorEnvelope{Error: errorBody{
+				Code:    "unauthenticated",
+				Message: "missing or invalid authorization header",
+			}})
+			return
+		}
+		token := strings.TrimPrefix(header, prefix)
+		p, err := auth.Authenticate(r.Context(), token)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, errorEnvelope{Error: errorBody{
+				Code:    "unauthenticated",
+				Message: "invalid token",
+			}})
+			return
+		}
+		ctx := context.WithValue(r.Context(), contextKey, p)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func (h *handler) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +193,7 @@ func (h *handler) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	audit, err := parseAuditMeta(r, payload.Audit)
+	audit, err := buildAuditMeta(r, payload.Audit)
 	if err != nil {
 		writeMappedError(w, err)
 		return
@@ -191,7 +253,7 @@ func (h *handler) handleRequestReturn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	audit, err := parseAuditMeta(r, payload.Audit)
+	audit, err := buildAuditMeta(r, payload.Audit)
 	if err != nil {
 		writeMappedError(w, err)
 		return
@@ -213,6 +275,40 @@ func (h *handler) handleRequestReturn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// buildAuditMeta constructs AuditMeta exclusively from the authenticated Principal
+// in the request context, plus optional client-side timing metadata.
+//
+// Missing Principal → 500, NOT 401.
+// A missing principal signals a programming error (middleware was bypassed) and
+// must surface loudly, not silently pass as an auth error.
+//
+// X-Client-Occurred-At header and ClientOccurredAt body field are informational
+// (offline client timestamp) and remain legitimate — they carry no identity.
+func buildAuditMeta(r *http.Request, payload auditPayload) (usecases.AuditMeta, error) {
+	p, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		return usecases.AuditMeta{}, fmt.Errorf("principal not in context: programming error")
+	}
+
+	clientOccurredAt := payload.ClientOccurredAt
+	if raw := r.Header.Get("X-Client-Occurred-At"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return usecases.AuditMeta{}, fmt.Errorf("client occurred at header: %w", domain.ErrInvalidTimeRange)
+		}
+		t := parsed
+		clientOccurredAt = &t
+	}
+
+	return usecases.AuditMeta{
+		ActorID:          p.UserID,
+		ActorRole:        p.Role,
+		ClientOccurredAt: clientOccurredAt,
+		ClientSeq:        payload.ClientSeq,
+		Note:             payload.Note,
+	}, nil
 }
 
 func toResourceClassIDs(items []string) []domain.ResourceClassID {
@@ -251,47 +347,6 @@ func requestFromDomain(req *domain.Request) requestResponse {
 	}
 }
 
-func parseAuditMeta(r *http.Request, payload auditPayload) (usecases.AuditMeta, error) {
-	role, err := parseActorRole(firstNonEmpty(r.Header.Get("X-Actor-Role"), payload.ActorRole))
-	if err != nil {
-		return usecases.AuditMeta{}, err
-	}
-
-	clientOccurredAt := payload.ClientOccurredAt
-	if raw := r.Header.Get("X-Client-Occurred-At"); raw != "" {
-		parsed, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			return usecases.AuditMeta{}, fmt.Errorf("audit client occurred at header: %w", domain.ErrInvalidTimeRange)
-		}
-		clientOccurredAt = new(parsed)
-	}
-
-	return usecases.AuditMeta{
-		ActorID:          domain.UserID(firstNonEmpty(r.Header.Get("X-Actor-ID"), payload.ActorID)),
-		ActorRole:        role,
-		ClientOccurredAt: clientOccurredAt,
-		ClientSeq:        payload.ClientSeq,
-		Note:             payload.Note,
-	}, nil
-}
-
-func parseActorRole(raw string) (domain.ActorRole, error) {
-	role := domain.ActorRole(raw)
-	switch role {
-	case "", domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleSystem:
-		return role, nil
-	default:
-		return "", fmt.Errorf("audit actor role: %w", domain.ErrInvalidState)
-	}
-}
-
-func firstNonEmpty(primary string, secondary string) string {
-	if primary != "" {
-		return primary
-	}
-	return secondary
-}
-
 func decodeJSONBody(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -318,17 +373,19 @@ func writeBadRequest(w http.ResponseWriter) {
 
 func mapHTTPError(err error) (int, string, string) {
 	switch {
+	case errors.Is(err, ports.ErrUnauthenticated):
+		return http.StatusUnauthorized, "unauthenticated", "invalid or missing credentials"
 	case errors.Is(err, ports.ErrNotFound):
 		return http.StatusNotFound, "not_found", "resource not found"
-	case errors.Is(err, ports.ErrConflict):
+	case errors.Is(err, ports.ErrConflict),
+		errors.Is(err, domain.ErrAlreadyCompleted):
 		return http.StatusConflict, "conflict", "conflict"
 	case errors.Is(err, ports.ErrValidation),
 		errors.Is(err, domain.ErrRequiredField),
 		errors.Is(err, domain.ErrInvalidState),
 		errors.Is(err, domain.ErrInvalidTimeRange),
 		errors.Is(err, domain.ErrReasonRequired),
-		errors.Is(err, domain.ErrInvalidTransition),
-		errors.Is(err, domain.ErrAlreadyCompleted):
+		errors.Is(err, domain.ErrInvalidTransition):
 		return http.StatusUnprocessableEntity, "validation_error", "validation failed"
 	default:
 		return http.StatusInternalServerError, "internal_error", "internal server error"

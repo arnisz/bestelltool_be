@@ -6,6 +6,17 @@ import (
 	"bestelltool_be/internal/domain"
 )
 
+// Principal represents an authenticated user identity.
+type Principal struct {
+	UserID domain.UserID
+	Role   domain.ActorRole
+}
+
+// Authenticator verifies a bearer token and returns the associated Principal.
+type Authenticator interface {
+	Authenticate(ctx context.Context, token string) (*Principal, error)
+}
+
 // RequestRepository provides persistence access for requests.
 type RequestRepository interface {
 	GetByID(ctx context.Context, id domain.RequestID) (*domain.Request, error)
@@ -25,6 +36,7 @@ type ResourceRepository interface {
 type AllocationRepository interface {
 	GetByID(ctx context.Context, id domain.AllocationID) (*domain.Allocation, error)
 	GetForUpdate(ctx context.Context, id domain.AllocationID) (*domain.Allocation, error)
+	Create(ctx context.Context, a *domain.Allocation) error
 	Save(ctx context.Context, allocation *domain.Allocation) error
 }
 

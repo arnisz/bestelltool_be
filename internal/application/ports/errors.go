@@ -9,4 +9,6 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrValidation signals invalid input or violated constraints.
 	ErrValidation = errors.New("validation")
+	// ErrUnauthenticated signals a missing or invalid authentication credential.
+	ErrUnauthenticated = errors.New("unauthenticated")
 )

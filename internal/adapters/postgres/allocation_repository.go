@@ -125,3 +125,38 @@ WHERE id = $11
 
 	return nil
 }
+
+// Create inserts a new allocation. Returns ErrConflict if the unique active-resource
+// index fires (uq_allocations_single_active_resource).
+func (r *allocationRepository) Create(ctx context.Context, a *domain.Allocation) error {
+	if a == nil {
+		return fmt.Errorf("allocation nil: %w", ErrValidation)
+	}
+
+	_, err := r.q.Exec(ctx, `
+INSERT INTO allocations(id, request_id, resource_id, status, planned_from, planned_until,
+    return_requested_at, shipped_at, received_at, version, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		string(a.ID),
+		string(a.RequestID),
+		string(a.ResourceID),
+		string(a.Status),
+		a.PlannedFrom,
+		a.PlannedUntil,
+		optionalTime(a.ReturnRequestedAt),
+		optionalTime(a.ShippedAt),
+		optionalTime(a.ReceivedAt),
+		a.Version,
+		a.CreatedAt,
+		a.UpdatedAt,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_allocations_single_active_resource" {
+			return fmt.Errorf("allocation active unique: %w", ErrConflict)
+		}
+		return mapWriteError("allocation", err)
+	}
+
+	return nil
+}

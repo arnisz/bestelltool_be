@@ -58,10 +58,12 @@ func (t *fakeTx) Audits() ports.AuditWriter               { return t.audits }
 func (t *fakeTx) Idempotency() ports.IdempotencyStore     { return nil }
 
 type fakeAllocationRepo struct {
-	items       map[domain.AllocationID]*domain.Allocation
-	saves       int
-	savedTxIDs  []int
-	loadedTxIDs []int
+	items        map[domain.AllocationID]*domain.Allocation
+	saves        int
+	savedTxIDs   []int
+	loadedTxIDs  []int
+	creates      int
+	createdTxIDs []int
 }
 
 func (r *fakeAllocationRepo) GetByID(_ context.Context, id domain.AllocationID) (*domain.Allocation, error) {
@@ -79,6 +81,14 @@ func (r *fakeAllocationRepo) Save(ctx context.Context, allocation *domain.Alloca
 	r.saves++
 	r.savedTxIDs = append(r.savedTxIDs, txID)
 	r.items[allocation.ID] = allocation
+	return nil
+}
+
+func (r *fakeAllocationRepo) Create(ctx context.Context, a *domain.Allocation) error {
+	txID, _ := ctx.Value(txContextKey{}).(int)
+	r.creates++
+	r.createdTxIDs = append(r.createdTxIDs, txID)
+	r.items[a.ID] = a
 	return nil
 }
 
@@ -393,6 +403,24 @@ func mustBlockedResource(t *testing.T) *domain.Resource {
 	return res
 }
 
+func mustInUseResource(t *testing.T) *domain.Resource {
+	t.Helper()
+	res, err := domain.NewResource("res-1", "rc-1", "S-1", "LOC-1", nil, nil)
+	if err != nil {
+		t.Fatalf("NewResource() error = %v", err)
+	}
+	if err := res.Reserve("tech-1"); err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	if err := res.MarkIssued(); err != nil {
+		t.Fatalf("MarkIssued() error = %v", err)
+	}
+	if err := res.MarkInUse(); err != nil {
+		t.Fatalf("MarkInUse() error = %v", err)
+	}
+	return res
+}
+
 func TestMarkAllocationShippedBackExecuteSuccess(t *testing.T) {
 	tx := newFakeTx(t)
 	uow := &fakeUoW{tx: tx}
@@ -554,4 +582,212 @@ func ExampleNewRequestReturnUseCase() {
 	_ = NewRequestReturnUseCase(nil)
 	fmt.Println("ok")
 	// Output: ok
+}
+
+// ── TransferResource use case tests ─────────────────────────────────────────
+
+func setupTransferTx(t *testing.T) (*fakeTx, *domain.Allocation, *domain.Resource, domain.RequestID) {
+	t.Helper()
+	tx := newFakeTx(t)
+
+	// Old allocation: a-1 → request r-1, resource res-1
+	oldAlloc := mustAllocationInWithTechnicianState(t)
+	tx.allocations.items[oldAlloc.ID] = oldAlloc
+
+	// Resource in in_use state (same ID as alloc: res-1)
+	res := mustInUseResource(t)
+	tx.resources.items[res.ID] = res
+
+	// Source request (r-1 = oldAlloc.RequestID)
+	from := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	src, _ := domain.NewRequest("r-1", "tech-1", "ctx", "ctx-label", nil, nil, "",
+		[]domain.ResourceClassID{"rc-1"}, from)
+	tx.requests.items[src.ID] = src
+
+	// Target request (different ID)
+	tgt, _ := domain.NewRequest("req-target", "tech-2", "ctx2", "ctx2-label", nil, nil, "",
+		[]domain.ResourceClassID{"rc-1"}, from)
+	tx.requests.items[tgt.ID] = tgt
+
+	return tx, oldAlloc, res, tgt.ID
+}
+
+func makeTransferInput(targetID domain.RequestID) TransferResourceInput {
+	at := time.Date(2026, 7, 18, 10, 30, 0, 0, time.UTC)
+	return TransferResourceInput{
+		OldAllocationID: "a-1",
+		NewAllocationID: "new-alloc-1",
+		TargetRequestID: targetID,
+		PlannedFrom:     at,
+		PlannedUntil:    at.Add(2 * time.Hour),
+		At:              at,
+		Audit: AuditMeta{
+			ActorID:   domain.UserID("dispatcher-1"),
+			ActorRole: domain.ActorRoleDispatcher,
+		},
+	}
+}
+
+func TestTransferResourceSuccess(t *testing.T) {
+	tx, oldAlloc, res, targetID := setupTransferTx(t)
+	uow := &fakeUoW{tx: tx}
+	uc := NewTransferResourceUseCase(uow)
+
+	if err := uc.Execute(t.Context(), makeTransferInput(targetID)); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Old allocation completed
+	if oldAlloc.Status != domain.AllocationStatusCompleted {
+		t.Fatalf("old alloc status = %s, want completed", oldAlloc.Status)
+	}
+	// Resource reserved with new holder
+	if res.Status != domain.ResourceStatusReserved {
+		t.Fatalf("resource status = %s, want reserved", res.Status)
+	}
+	if res.HolderID == nil || *res.HolderID != "tech-2" {
+		t.Fatalf("resource holder = %v, want tech-2", res.HolderID)
+	}
+	// New allocation created and active
+	newAlloc, ok := tx.allocations.items["new-alloc-1"]
+	if !ok {
+		t.Fatal("new allocation not found in repo")
+	}
+	if newAlloc.Status != domain.AllocationStatusAllocated {
+		t.Fatalf("new alloc status = %s, want allocated", newAlloc.Status)
+	}
+	if newAlloc.RequestID != targetID {
+		t.Fatalf("new alloc request = %s, want %s", newAlloc.RequestID, targetID)
+	}
+	// Saves: 1 (old alloc), Creates: 1 (new alloc), Resources.Save: 1
+	if tx.allocations.saves != 1 {
+		t.Fatalf("alloc saves = %d, want 1", tx.allocations.saves)
+	}
+	if tx.allocations.creates != 1 {
+		t.Fatalf("alloc creates = %d, want 1", tx.allocations.creates)
+	}
+	if tx.resources.saves != 1 {
+		t.Fatalf("resource saves = %d, want 1", tx.resources.saves)
+	}
+	// Two audit events
+	if len(tx.audits.events) != 2 {
+		t.Fatalf("audit events = %d, want 2", len(tx.audits.events))
+	}
+	e1 := tx.audits.events[0]
+	if e1.Action != "complete_direct_transfer" {
+		t.Fatalf("audit[0].Action = %s, want complete_direct_transfer", e1.Action)
+	}
+	if e1.ToStatus != string(domain.AllocationStatusCompleted) {
+		t.Fatalf("audit[0].ToStatus = %s, want completed", e1.ToStatus)
+	}
+	e2 := tx.audits.events[1]
+	if e2.Action != "direct_transfer_activate" {
+		t.Fatalf("audit[1].Action = %s, want direct_transfer_activate", e2.Action)
+	}
+	if e2.ToStatus != string(domain.AllocationStatusAllocated) {
+		t.Fatalf("audit[1].ToStatus = %s, want allocated", e2.ToStatus)
+	}
+	// Same transaction for all operations
+	if tx.allocations.savedTxIDs[0] != tx.audits.txIDs[0] {
+		t.Fatalf("alloc save tx %d != audit tx %d", tx.allocations.savedTxIDs[0], tx.audits.txIDs[0])
+	}
+	if uow.commits != 1 {
+		t.Fatalf("commits = %d, want 1", uow.commits)
+	}
+}
+
+func TestTransferResourceBlockedGuard(t *testing.T) {
+	tx, _, _, targetID := setupTransferTx(t)
+	// Inject block reason into the resource
+	reason := domain.BlockReasonDefective
+	tx.resources.items["res-1"].BlockReason = &reason
+
+	uow := &fakeUoW{tx: tx}
+	uc := NewTransferResourceUseCase(uow)
+
+	err := uc.Execute(t.Context(), makeTransferInput(targetID))
+	if !errors.Is(err, domain.ErrInvalidState) {
+		t.Fatalf("Execute() error = %v, want ErrInvalidState", err)
+	}
+	// Guard fires before any saves: no alloc saves, no creates, no audits
+	if tx.allocations.saves != 0 {
+		t.Fatalf("alloc saves = %d, want 0 (guard before save)", tx.allocations.saves)
+	}
+	if tx.allocations.creates != 0 {
+		t.Fatalf("alloc creates = %d, want 0", tx.allocations.creates)
+	}
+	if len(tx.audits.events) != 0 {
+		t.Fatalf("audit events = %d, want 0", len(tx.audits.events))
+	}
+	if uow.commits != 0 {
+		t.Fatalf("commits = %d, want 0", uow.commits)
+	}
+	if uow.rollbacks != 1 {
+		t.Fatalf("rollbacks = %d, want 1", uow.rollbacks)
+	}
+}
+
+func TestTransferResourceAuditErrorRollsBack(t *testing.T) {
+	tx, _, _, targetID := setupTransferTx(t)
+	tx.audits.failOnWrite = true
+	uow := &fakeUoW{tx: tx}
+	uc := NewTransferResourceUseCase(uow)
+
+	err := uc.Execute(t.Context(), makeTransferInput(targetID))
+	if !errors.Is(err, errAuditFailed) {
+		t.Fatalf("Execute() error = %v, want errAuditFailed", err)
+	}
+	if uow.commits != 0 {
+		t.Fatalf("commits = %d, want 0", uow.commits)
+	}
+	if uow.rollbacks != 1 {
+		t.Fatalf("rollbacks = %d, want 1", uow.rollbacks)
+	}
+}
+
+func TestTransferResourceTerminalTargetRequest(t *testing.T) {
+	tx, _, _, _ := setupTransferTx(t)
+	uow := &fakeUoW{tx: tx}
+	uc := NewTransferResourceUseCase(uow)
+
+	// Force target request into completed state
+	tgt := tx.requests.items["req-target"]
+	_ = tgt.StartProgress(time.Now())
+	_ = tgt.MarkAllocated(time.Now().Add(time.Second))
+	_ = tgt.Activate(time.Now().Add(2 * time.Second))
+	_ = tgt.Complete(time.Now().Add(3*time.Second), true)
+
+	err := uc.Execute(t.Context(), makeTransferInput("req-target"))
+	if !errors.Is(err, domain.ErrInvalidState) {
+		t.Fatalf("Execute() error = %v, want ErrInvalidState", err)
+	}
+	// Guard fires before any saves
+	if tx.allocations.saves != 0 {
+		t.Fatalf("alloc saves = %d, want 0", tx.allocations.saves)
+	}
+	if uow.commits != 0 {
+		t.Fatalf("commits = %d, want 0", uow.commits)
+	}
+}
+
+func TestTransferResourceSameRequestGuard(t *testing.T) {
+	tx, oldAlloc, _, _ := setupTransferTx(t)
+	uow := &fakeUoW{tx: tx}
+	uc := NewTransferResourceUseCase(uow)
+
+	// TargetRequestID == oldAlloc.RequestID: should fail
+	in := makeTransferInput(oldAlloc.RequestID)
+	// Need the source request in the map under oldAlloc.RequestID
+	tx.requests.items[oldAlloc.RequestID] = tx.requests.items["r-1"]
+
+	err := uc.Execute(t.Context(), in)
+	if !errors.Is(err, domain.ErrInvalidState) {
+		t.Fatalf("Execute() error = %v, want ErrInvalidState", err)
+	}
+	if tx.allocations.saves != 0 {
+		t.Fatalf("alloc saves = %d, want 0 (guard before save)", tx.allocations.saves)
+	}
+	if uow.commits != 0 {
+		t.Fatalf("commits = %d, want 0", uow.commits)
+	}
 }

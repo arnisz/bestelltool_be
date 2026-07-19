@@ -145,3 +145,76 @@ func TestAllocationCancelOnlyBeforeShipment(t *testing.T) {
 		t.Fatalf("allocation changed on invalid cancel")
 	}
 }
+
+func TestAllocationCompleteDirectTransferSuccess(t *testing.T) {
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	a, _ := NewAllocation("a1", "r1", "res1", now.Add(time.Hour), now.Add(2*time.Hour), now)
+	_ = a.MarkShipped(now.Add(time.Minute))
+	_ = a.MarkReceivedByTechnician(now.Add(2 * time.Minute))
+
+	prevVersion := a.Version
+	at := now.Add(3 * time.Minute)
+	if err := a.CompleteDirectTransfer(at); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if a.Status != AllocationStatusCompleted {
+		t.Fatalf("expected completed, got %s", a.Status)
+	}
+	if !a.UpdatedAt.Equal(at) {
+		t.Fatalf("expected UpdatedAt = %v, got %v", at, a.UpdatedAt)
+	}
+	if a.Version != prevVersion+1 {
+		t.Fatalf("expected version %d, got %d", prevVersion+1, a.Version)
+	}
+}
+
+func TestAllocationCompleteDirectTransferWrongState(t *testing.T) {
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	a, _ := NewAllocation("a1", "r1", "res1", now.Add(time.Hour), now.Add(2*time.Hour), now)
+	// Status: allocated (wrong state for CompleteDirectTransfer)
+
+	oldStatus := a.Status
+	oldVersion := a.Version
+	err := a.CompleteDirectTransfer(now.Add(time.Minute))
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	}
+	if a.Status != oldStatus || a.Version != oldVersion {
+		t.Fatalf("allocation changed on failed transition")
+	}
+}
+
+func TestAllocationCompleteDirectTransferAlreadyCompleted(t *testing.T) {
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	a, _ := NewAllocation("a1", "r1", "res1", now.Add(time.Hour), now.Add(2*time.Hour), now)
+	_ = a.MarkShipped(now.Add(time.Minute))
+	_ = a.MarkReceivedByTechnician(now.Add(2 * time.Minute))
+	_ = a.RequestReturn(now.Add(3 * time.Minute))
+	_ = a.MarkShippedBack(now.Add(4 * time.Minute))
+	_ = a.StartInspection(now.Add(5 * time.Minute))
+	_ = a.CompleteInspection(now.Add(6 * time.Minute))
+
+	err := a.CompleteDirectTransfer(now.Add(7 * time.Minute))
+	if !errors.Is(err, ErrAlreadyCompleted) {
+		t.Fatalf("expected ErrAlreadyCompleted, got %v", err)
+	}
+}
+
+func TestAllocationCompleteDirectTransferWithPendingReturnRequest(t *testing.T) {
+	// ReturnRequestedAt set but Status still with_technician: transfer must succeed.
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	a, _ := NewAllocation("a1", "r1", "res1", now.Add(time.Hour), now.Add(2*time.Hour), now)
+	_ = a.MarkShipped(now.Add(time.Minute))
+	_ = a.MarkReceivedByTechnician(now.Add(2 * time.Minute))
+
+	// Simulate a pending return-request field without transitioning status
+	pending := now.Add(2*time.Minute + 30*time.Second)
+	a.ReturnRequestedAt = &pending
+
+	if err := a.CompleteDirectTransfer(now.Add(3 * time.Minute)); err != nil {
+		t.Fatalf("unexpected error with pending return request: %v", err)
+	}
+	if a.Status != AllocationStatusCompleted {
+		t.Fatalf("expected completed, got %s", a.Status)
+	}
+}

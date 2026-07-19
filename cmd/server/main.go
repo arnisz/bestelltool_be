@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	authadapter "bestelltool_be/internal/adapters/auth"
 	httpadapter "bestelltool_be/internal/adapters/http"
 	"bestelltool_be/internal/adapters/postgres"
 	"bestelltool_be/internal/application/usecases"
@@ -35,10 +36,16 @@ func run() error {
 	}
 	defer pool.Close()
 
+	authenticator, err := authadapter.ParseStaticTokens(cfg.StaticTokens)
+	if err != nil {
+		return fmt.Errorf("parse static tokens: %w", err)
+	}
+
 	uow := postgres.NewUnitOfWork(pool)
 	requestRepo := postgres.NewRequestRepository(pool)
 
 	handler := httpadapter.NewHandler(
+		authenticator,
 		usecases.NewCreateRequestUseCase(uow),
 		usecases.NewGetRequestUseCase(requestRepo),
 		usecases.NewRequestReturnUseCase(uow),

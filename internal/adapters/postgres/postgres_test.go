@@ -501,11 +501,19 @@ func TestResourceRepositoryRoundTripAndLocking(t *testing.T) {
 		t.Fatalf("Commit A error = %v", err)
 	}
 
+	// txB's connection was poisoned by the context cancellation (pgx marks it closed).
+	// Open a fresh transaction to verify the lock is now acquirable.
+	txC, err := pool.BeginTx(t.Context(), pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("BeginTx C error = %v", err)
+	}
+	t.Cleanup(func() { _ = txC.Rollback(t.Context()) })
+
 	unlockCtx, unlockCancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer unlockCancel()
 	var id string
-	if err := txB.QueryRow(unlockCtx, `SELECT id FROM resources WHERE id = $1 FOR UPDATE`, "res-repo").Scan(&id); err != nil {
-		t.Fatalf("txB lock after release error = %v", err)
+	if err := txC.QueryRow(unlockCtx, `SELECT id FROM resources WHERE id = $1 FOR UPDATE`, "res-repo").Scan(&id); err != nil {
+		t.Fatalf("txC lock after release error = %v", err)
 	}
 }
 
@@ -552,12 +560,23 @@ func TestAllocationRepositoryRoundTripAndUniqueActive(t *testing.T) {
 	}
 
 	insertRequest(t, pool, "req-alloc-2", now)
-	insertAllocation(t, pool, "alloc-2", "req-alloc-2", "res-alloc", now)
+	// Insert alloc-2 as 'completed' (terminal, not in uq_allocations_single_active_resource).
+	// alloc-1 is still 'shipped_back' (active per constraint), so inserting as any active
+	// status would fire the unique index at INSERT time before repo.Save can map it to
+	// ErrConflict. Starting terminal lets us test the conflict path via repo.Save instead.
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO allocations(id, request_id, resource_id, status, planned_from, planned_until,
+                        return_requested_at, shipped_at, received_at, version, created_at, updated_at)
+VALUES ($1, $2, $3, 'completed', $4, $5, NULL, NULL, NULL, 1, $4, $4)
+`, "alloc-2", "req-alloc-2", "res-alloc", now, now.Add(2*time.Hour)); err != nil {
+		t.Fatalf("insert alloc-2 as completed error = %v", err)
+	}
 	dup, err := repo.GetByID(t.Context(), "alloc-2")
 	if err != nil {
 		t.Fatalf("GetByID alloc-2 error = %v", err)
 	}
-	dup.Status = domain.AllocationStatusShipped
+	// Try to activate alloc-2 while alloc-1 is still active (shipped_back) → expect ErrConflict.
+	dup.Status = domain.AllocationStatusAllocated
 	dup.Version = 2
 	dup.UpdatedAt = now.Add(20 * time.Minute)
 	if err := repo.Save(t.Context(), dup); !errors.Is(err, ErrConflict) {
@@ -570,7 +589,9 @@ func TestAllocationRepositoryRoundTripAndUniqueActive(t *testing.T) {
 	if err := repo.Save(t.Context(), a); err != nil {
 		t.Fatalf("Save(completed alloc-1) error = %v", err)
 	}
-	dup.Status = domain.AllocationStatusShipped
+	// alloc-1 is now terminal; the failed conflict-save left alloc-2 at version=1 in DB.
+	// Activate alloc-2 (completed → allocated, then ships) — should now succeed.
+	dup.Status = domain.AllocationStatusAllocated
 	dup.Version = 2
 	dup.UpdatedAt = now.Add(50 * time.Minute)
 	if err := repo.Save(t.Context(), dup); err != nil {
@@ -686,5 +707,144 @@ INSERT INTO request_resource_classes(request_id, position, resource_class_id) VA
 	}
 	if state != string(domain.ExecutionStateBlocked) || version != 2 {
 		t.Fatalf("state/version after rollback = %s/%d, want blocked/2", state, version)
+	}
+}
+
+// TestTransferResourceWithPostgres verifies the full direct-transfer use case against
+// a real PostgreSQL database. Critical invariant: old allocation is saved as completed
+// BEFORE the new allocation is created, so the unique partial index never sees two
+// active allocations for the same resource in the same transaction.
+func TestTransferResourceWithPostgres(t *testing.T) {
+	pool := testPool(t)
+	uow := NewUnitOfWork(pool)
+	truncateAll(t, pool)
+	seedCoreRefs(t, pool)
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+
+	// Seed target technician (not in seedCoreRefs)
+	if _, err := pool.Exec(t.Context(),
+		`INSERT INTO users(id, role, display_name) VALUES ('tech-2', 'technician', 'Tech Two')`); err != nil {
+		t.Fatalf("seed tech-2 error = %v", err)
+	}
+
+	// Source request (tech-1) and target request (tech-2)
+	insertRequest(t, pool, "req-src", now)
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO requests(id, technician_id, status, execution_state, execution_note,
+    context_ref, context_label, wish_from, wish_until, note, version, created_at, updated_at)
+VALUES ('req-tgt', 'tech-2', 'open', 'executable', '', 'ctx', 'ctx', NULL, NULL, '', 1, $1, $1)`,
+		now); err != nil {
+		t.Fatalf("insert req-tgt error = %v", err)
+	}
+
+	// Resource in in_use state (version 4 = new+reserve+issue+in_use)
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO resources(id, resource_class_id, serial_number, status, block_reason, block_note,
+    holder_id, location, valid_until, metadata, version, created_at, updated_at)
+VALUES ('res-transfer', 'rc-1', 'serial-transfer', 'in_use', NULL, '',
+    'tech-1', '', NULL, '{}'::jsonb, 4, $1, $1)`,
+		now); err != nil {
+		t.Fatalf("insert resource error = %v", err)
+	}
+
+	// Old allocation in with_technician state (version 3 = alloc+ship+receive)
+	shippedAt := now.Add(10 * time.Minute)
+	receivedAt := now.Add(20 * time.Minute)
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO allocations(id, request_id, resource_id, status, planned_from, planned_until,
+    return_requested_at, shipped_at, received_at, version, created_at, updated_at)
+VALUES ('alloc-src', 'req-src', 'res-transfer', 'with_technician',
+    $1, $2, NULL, $3, $4, 3, $1, $4)`,
+		now, now.Add(2*time.Hour), shippedAt, receivedAt); err != nil {
+		t.Fatalf("insert alloc-src error = %v", err)
+	}
+
+	at := now.Add(30 * time.Minute)
+	err := usecases.NewTransferResourceUseCase(uow).Execute(t.Context(), usecases.TransferResourceInput{
+		OldAllocationID: "alloc-src",
+		NewAllocationID: "alloc-tgt",
+		TargetRequestID: "req-tgt",
+		PlannedFrom:     at,
+		PlannedUntil:    at.Add(2 * time.Hour),
+		At:              at,
+		Audit: usecases.AuditMeta{
+			ActorID:   "dispatcher-1",
+			ActorRole: domain.ActorRoleDispatcher,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Old allocation must be completed
+	var oldStatus string
+	if err := pool.QueryRow(t.Context(),
+		`SELECT status FROM allocations WHERE id = 'alloc-src'`).Scan(&oldStatus); err != nil {
+		t.Fatalf("scan old alloc status error = %v", err)
+	}
+	if oldStatus != "completed" {
+		t.Fatalf("old alloc status = %s, want completed", oldStatus)
+	}
+
+	// New allocation must exist and be active (allocated)
+	var newStatus, newReqID, newResID string
+	if err := pool.QueryRow(t.Context(),
+		`SELECT status, request_id, resource_id FROM allocations WHERE id = 'alloc-tgt'`).
+		Scan(&newStatus, &newReqID, &newResID); err != nil {
+		t.Fatalf("scan new alloc error = %v", err)
+	}
+	if newStatus != "allocated" || newReqID != "req-tgt" || newResID != "res-transfer" {
+		t.Fatalf("new alloc = {%s,%s,%s}, want {allocated,req-tgt,res-transfer}",
+			newStatus, newReqID, newResID)
+	}
+
+	// Resource must be reserved with tech-2 as holder
+	var resStatus, resHolder string
+	if err := pool.QueryRow(t.Context(),
+		`SELECT status, holder_id FROM resources WHERE id = 'res-transfer'`).
+		Scan(&resStatus, &resHolder); err != nil {
+		t.Fatalf("scan resource error = %v", err)
+	}
+	if resStatus != "reserved" || resHolder != "tech-2" {
+		t.Fatalf("resource = {%s,%s}, want {reserved,tech-2}", resStatus, resHolder)
+	}
+
+	// Exactly 2 audit events for the 2 allocation operations
+	var auditCount int
+	if err := pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM audit_events WHERE entity_type = 'allocation'`).
+		Scan(&auditCount); err != nil {
+		t.Fatalf("scan audit count error = %v", err)
+	}
+	if auditCount != 2 {
+		t.Fatalf("audit events = %d, want 2", auditCount)
+	}
+}
+
+// TestTransferResourceConflictNewAllocWhileOldActive verifies that trying to create
+// a new active allocation for a resource that already has an active allocation
+// returns ErrConflict (uq_allocations_single_active_resource fires).
+func TestTransferResourceConflictNewAllocWhileOldActive(t *testing.T) {
+	pool := testPool(t)
+	truncateAll(t, pool)
+	seedCoreRefs(t, pool)
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+
+	insertRequest(t, pool, "req-1", now)
+	insertRequest(t, pool, "req-2", now)
+	insertResource(t, pool, "res-conflict", now)
+	// Insert an active allocation for res-conflict (status = 'allocated' counts as active)
+	insertAllocation(t, pool, "alloc-active", "req-1", "res-conflict", now)
+
+	repo := &allocationRepository{q: pool}
+
+	// Attempt to create another active allocation for the same resource
+	newAlloc, err := domain.NewAllocation("alloc-new", "req-2", "res-conflict",
+		now, now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("NewAllocation() error = %v", err)
+	}
+	if err := repo.Create(t.Context(), newAlloc); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Create() error = %v, want ErrConflict", err)
 	}
 }

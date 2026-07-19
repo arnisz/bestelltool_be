@@ -9,6 +9,7 @@ import (
 
 type serverConfig struct {
 	DatabaseURL     string
+	StaticTokens    string
 	HTTPAddr        string
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -26,11 +27,15 @@ func loadConfigFromEnv() (serverConfig, error) {
 	)
 
 	cfg := serverConfig{
-		DatabaseURL: strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		HTTPAddr:    strings.TrimSpace(os.Getenv("HTTP_ADDR")),
+		DatabaseURL:  strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		StaticTokens: strings.TrimSpace(os.Getenv("AUTH_STATIC_TOKENS")),
+		HTTPAddr:     strings.TrimSpace(os.Getenv("HTTP_ADDR")),
 	}
 	if cfg.DatabaseURL == "" {
 		return serverConfig{}, fmt.Errorf("DATABASE_URL is required")
+	}
+	if cfg.StaticTokens == "" {
+		return serverConfig{}, fmt.Errorf("AUTH_STATIC_TOKENS is required")
 	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = defaultHTTPAddr

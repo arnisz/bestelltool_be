@@ -163,6 +163,25 @@ func (r *Resource) MarkExternallyProcured() error {
 	return nil
 }
 
+// TransferDirect transitions resource from in_use to reserved for a direct
+// site-to-site transfer. The resource must have no active block.
+func (r *Resource) TransferDirect(newHolderID UserID) error {
+	if r.Status != ResourceStatusInUse {
+		return fmt.Errorf("transition resource from %s to %s: %w", r.Status, ResourceStatusReserved, ErrInvalidTransition)
+	}
+	if r.BlockReason != nil {
+		return fmt.Errorf("resource has active block: %w", ErrInvalidState)
+	}
+	if newHolderID == "" {
+		return fmt.Errorf("new holder id: %w", ErrRequiredField)
+	}
+
+	r.Status = ResourceStatusReserved
+	r.HolderID = &newHolderID
+	r.Version++
+	return nil
+}
+
 func isValidBlockReason(reason BlockReason) bool {
 	switch reason {
 	case BlockReasonDefective, BlockReasonMaintenance, BlockReasonInspectionDue:

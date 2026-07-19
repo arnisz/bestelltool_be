@@ -188,3 +188,23 @@ func (a *Allocation) Cancel(at time.Time) error {
 	a.Version++
 	return nil
 }
+
+// CompleteDirectTransfer transitions allocation from with_technician to completed
+// for a direct site-to-site transfer. A pending ReturnRequestedAt does not block
+// the transfer — the direct transfer overtakes a pending return request.
+func (a *Allocation) CompleteDirectTransfer(at time.Time) error {
+	if a.Status == AllocationStatusCompleted {
+		return fmt.Errorf("allocation already completed: %w", ErrAlreadyCompleted)
+	}
+	if a.Status != AllocationStatusWithTechnician {
+		return fmt.Errorf("transition allocation from %s to %s: %w", a.Status, AllocationStatusCompleted, ErrInvalidTransition)
+	}
+	if at.Before(a.UpdatedAt) {
+		return fmt.Errorf("completion time moved backwards: %w", ErrInvalidTimeRange)
+	}
+
+	a.Status = AllocationStatusCompleted
+	a.UpdatedAt = at
+	a.Version++
+	return nil
+}
