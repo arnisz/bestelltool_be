@@ -4,14 +4,16 @@ import (
 	"errors"
 	"fmt"
 
+	"bestelltool_be/internal/application/ports"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
-	ErrNotFound   = errors.New("not found")
-	ErrConflict   = errors.New("conflict")
-	ErrValidation = errors.New("validation")
+	ErrNotFound   = ports.ErrNotFound
+	ErrConflict   = ports.ErrConflict
+	ErrValidation = ports.ErrValidation
 )
 
 func mapReadError(entity string, err error) error {
@@ -29,8 +31,7 @@ func mapWriteError(entity string, err error) error {
 		return nil
 	}
 
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		switch pgErr.Code {
 		case "23505":
 			return fmt.Errorf("%s unique constraint %s: %w", entity, pgErr.ConstraintName, ErrConflict)

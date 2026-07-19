@@ -83,9 +83,11 @@ func (r *fakeAllocationRepo) Save(ctx context.Context, allocation *domain.Alloca
 }
 
 type fakeRequestRepo struct {
-	items      map[domain.RequestID]*domain.Request
-	saves      int
-	savedTxIDs []int
+	items        map[domain.RequestID]*domain.Request
+	creates      int
+	createdTxIDs []int
+	saves        int
+	savedTxIDs   []int
 }
 
 func (r *fakeRequestRepo) GetByID(_ context.Context, id domain.RequestID) (*domain.Request, error) {
@@ -94,6 +96,14 @@ func (r *fakeRequestRepo) GetByID(_ context.Context, id domain.RequestID) (*doma
 
 func (r *fakeRequestRepo) GetForUpdate(_ context.Context, id domain.RequestID) (*domain.Request, error) {
 	return r.items[id], nil
+}
+
+func (r *fakeRequestRepo) Create(ctx context.Context, req *domain.Request) error {
+	txID, _ := ctx.Value(txContextKey{}).(int)
+	r.creates++
+	r.createdTxIDs = append(r.createdTxIDs, txID)
+	r.items[req.ID] = req
+	return nil
 }
 
 func (r *fakeRequestRepo) Save(ctx context.Context, req *domain.Request) error {
@@ -313,9 +323,8 @@ func newFakeTx(t *testing.T) *fakeTx {
 func validAuditMeta(t *testing.T) AuditMeta {
 	t.Helper()
 	return AuditMeta{
-		ServerRecordedAt: time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC),
-		ActorID:          domain.UserID("dispatcher-1"),
-		ActorRole:        domain.ActorRoleDispatcher,
+		ActorID:   domain.UserID("dispatcher-1"),
+		ActorRole: domain.ActorRoleDispatcher,
 	}
 }
 
@@ -442,6 +451,95 @@ func TestUpdateExecutionStateExecuteDomainErrorDoesNotSave(t *testing.T) {
 	}
 	if tx.requests.saves != 0 {
 		t.Fatalf("save calls = %d, want 0", tx.requests.saves)
+	}
+}
+
+func TestCreateRequestExecuteSuccess(t *testing.T) {
+	tx := newFakeTx(t)
+	uow := &fakeUoW{tx: tx}
+	uc := NewCreateRequestUseCase(uow)
+	createdAt := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+
+	got, err := uc.Execute(t.Context(), CreateRequestInput{
+		RequestID:                "req-created",
+		TechnicianID:             "tech-1",
+		ContextRef:               "ctx",
+		ContextLabel:             "ctx-label",
+		RequestedResourceClasses: []domain.ResourceClassID{"rc-1", "rc-2"},
+		CreatedAt:                createdAt,
+		Audit:                    validAuditMeta(t),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Execute() returned nil request")
+	}
+	if tx.requests.creates != 1 {
+		t.Fatalf("create calls = %d, want 1", tx.requests.creates)
+	}
+	if tx.requests.saves != 0 {
+		t.Fatalf("save calls = %d, want 0", tx.requests.saves)
+	}
+	if len(tx.audits.events) != 1 {
+		t.Fatalf("audit events = %d, want 1", len(tx.audits.events))
+	}
+	e := tx.audits.events[0]
+	if e.Action != "create_request" {
+		t.Fatalf("audit action = %s, want create_request", e.Action)
+	}
+	if e.FromStatus != "" || e.ToStatus != string(domain.RequestStatusOpen) {
+		t.Fatalf("audit status transition = %q -> %q, want %q -> %q", e.FromStatus, e.ToStatus, "", domain.RequestStatusOpen)
+	}
+}
+
+func TestCreateRequestExecuteValidationErrorDoesNotWrite(t *testing.T) {
+	tx := newFakeTx(t)
+	uow := &fakeUoW{tx: tx}
+	uc := NewCreateRequestUseCase(uow)
+
+	_, err := uc.Execute(t.Context(), CreateRequestInput{
+		RequestID:                "req-created",
+		TechnicianID:             "tech-1",
+		ContextRef:               "ctx",
+		ContextLabel:             "ctx-label",
+		RequestedResourceClasses: nil,
+		CreatedAt:                time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC),
+		Audit:                    validAuditMeta(t),
+	})
+	if !errors.Is(err, domain.ErrRequiredField) {
+		t.Fatalf("Execute() error = %v, want ErrRequiredField", err)
+	}
+	if tx.requests.creates != 0 {
+		t.Fatalf("create calls = %d, want 0", tx.requests.creates)
+	}
+	if len(tx.audits.events) != 0 {
+		t.Fatalf("audit events = %d, want 0", len(tx.audits.events))
+	}
+}
+
+func TestGetRequestExecuteSuccess(t *testing.T) {
+	tx := newFakeTx(t)
+	req := mustRequest(t)
+	tx.requests.items[req.ID] = req
+	uc := NewGetRequestUseCase(tx.requests)
+
+	got, err := uc.Execute(t.Context(), req.ID)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got != req {
+		t.Fatalf("request mismatch: got %#v, want %#v", got, req)
+	}
+}
+
+func TestGetRequestExecuteNotFound(t *testing.T) {
+	tx := newFakeTx(t)
+	uc := NewGetRequestUseCase(tx.requests)
+
+	_, err := uc.Execute(t.Context(), "missing")
+	if !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("Execute() error = %v, want ErrNotFound", err)
 	}
 }
 

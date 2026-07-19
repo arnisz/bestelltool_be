@@ -9,7 +9,6 @@ import (
 
 // AuditMeta contains shared metadata for audit creation in use cases.
 type AuditMeta struct {
-	ServerRecordedAt time.Time
 	ClientOccurredAt *time.Time
 	ClientSeq        *int64
 	ActorID          domain.UserID
@@ -26,7 +25,6 @@ func newAuditEvent(
 	toStatus string,
 ) domain.AuditEvent {
 	return domain.AuditEvent{
-		ServerRecordedAt: meta.ServerRecordedAt,
 		ClientOccurredAt: meta.ClientOccurredAt,
 		ClientSeq:        meta.ClientSeq,
 		ActorID:          meta.ActorID,
@@ -41,9 +39,6 @@ func newAuditEvent(
 }
 
 func validateAuditMeta(meta AuditMeta) error {
-	if meta.ServerRecordedAt.IsZero() {
-		return fmt.Errorf("audit server recorded at: %w", domain.ErrRequiredField)
-	}
 	if meta.ActorID == "" {
 		return fmt.Errorf("audit actor id: %w", domain.ErrRequiredField)
 	}

@@ -1,7 +1,7 @@
 # Project Status: Resource Planning System (Go Backend)
 
 ## 🎯 Current Focus
-PostgreSQL-Adapter gegen die reale Raspberry-Pi-Testdatenbank validieren und Integrationstest-Abdeckung vervollständigen.
+Authentifizierungs-Port vorbereiten (danach SSE-Adapter umsetzen).
 
 ## ✅ Completed
 - [x] System Architecture and Requirements defined (`systemdesign.md`).
@@ -31,21 +31,23 @@ PostgreSQL-Adapter gegen die reale Raspberry-Pi-Testdatenbank validieren und Int
 - [x] PostgreSQL-IdempotencyStore implementiert.
 - [x] PostgreSQL-Integrationstests ergänzt (mit Skip bei fehlender `TEST_DATABASE_URL`).
 - [x] Konfliktbehandlung in PostgreSQL-Repositories geschärft: reine Versionssprünge ohne fachliche Feldänderung werden als Optimistic-Locking-Konflikt behandelt (Request/Resource/Allocation).
+- [x] Server-Konfiguration über Umgebungsvariablen implementiert (`DATABASE_URL`, `HTTP_ADDR`, Read/Write/Idle/Shutdown-Timeouts).
+- [x] Composition Root im Server-Bootstrap verdrahtet (pgx-Pool, UnitOfWork, Repositories, Use Cases, HTTP-Server, Graceful Shutdown).
+- [x] HTTP-Adapter mit Go 1.22 `ServeMux`-Method-Pattern-Routing implementiert.
+- [x] Einheitliches JSON-Fehlerformat implementiert: `{"error":{"code":"...","message":"..."}}` inkl. zentralem Error-Mapping (`404/409/422/500`).
+- [x] Erste Endpunkte angebunden: Request anlegen, Request abrufen, Allocation-Return anfordern (schreibend über Use Cases/UoW inkl. AuditEvents).
+- [x] Handler-Tests mit `httptest` und In-Memory-Fakes ergänzt (inkl. Fehler-Mapping 404/409/422 und ungültiges JSON 400).
+- [x] Vollständige technische Verifikation ausgeführt: `go build ./...`, `go vet ./...`, `go test -count=1 ./...`.
 
 ## 🔄 In Progress
 - [ ] PostgreSQL-Integrationstests gegen die Raspberry-Pi-Testdatenbank vollständig ausführen (lokal weiterhin Skip ohne `TEST_DATABASE_URL`).
 - [ ] Reale PostgreSQL-Validierung mit gesetzter `TEST_DATABASE_URL` durchführen (aktuell alle Adapter-Integrationstests als SKIP, da Variable in dieser Umgebung nicht gesetzt).
-- [ ] Erste HTTP-Use-Case-Anbindung und Server-Bootstrap vorbereiten.
+- [ ] Authentifizierungs-Port vorbereiten.
 
 ## ⏭️ Next Steps (in order)
-1. Server-Konfiguration definieren.
-2. PostgreSQL-Pool im Composition Root verdrahten.
-3. HTTP-Adapter mit Go 1.22 ServeMux erstellen.
-4. Einheitliche Fehlerantworten definieren.
-5. Erste Request- und Allocation-Endpunkte anbinden.
-6. Authentifizierungs-Port vorbereiten.
-7. SSE-Adapter vorbereiten.
-8. End-to-End-Tests ergänzen.
+1. SSE-Adapter vorbereiten.
+2. End-to-End-Tests ergänzen.
+3. PostgreSQL-Integrationstests gegen die reale Raspberry-Pi-Testdatenbank mit gesetzter `TEST_DATABASE_URL` vollständig validieren.
 
 ## ⚠️ Known Issues / Tech Debt
 - Derzeit keine zusätzlichen bekannten Laufzeitprobleme außerhalb der offenen In-Progress-Punkte dokumentiert.

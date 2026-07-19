@@ -9,6 +9,7 @@ import (
 	"bestelltool_be/internal/domain"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type requestRepository struct {
@@ -20,6 +21,10 @@ SELECT id, technician_id, status, execution_state, execution_note, context_ref, 
        wish_from, wish_until, note, version, created_at, updated_at
 FROM requests
 WHERE id = $1`
+
+func NewRequestRepository(pool *pgxpool.Pool) *requestRepository {
+	return &requestRepository{q: pool}
+}
 
 func (r *requestRepository) GetByID(ctx context.Context, id domain.RequestID) (*domain.Request, error) {
 	return r.get(ctx, id, false)
@@ -82,6 +87,55 @@ ORDER BY position`, string(id))
 	req.RequestedResourceClasses = classes
 
 	return &req, nil
+}
+
+func (r *requestRepository) Create(ctx context.Context, req *domain.Request) error {
+	if req == nil {
+		return fmt.Errorf("request nil: %w", ErrValidation)
+	}
+
+	if _, err := r.q.Exec(ctx, `
+INSERT INTO requests(
+    id,
+    technician_id,
+    status,
+    execution_state,
+    execution_note,
+    context_ref,
+    context_label,
+    wish_from,
+    wish_until,
+    note,
+    version,
+    created_at,
+    updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		string(req.ID),
+		string(req.TechnicianID),
+		string(req.Status),
+		string(req.ExecutionState),
+		req.ExecutionNote,
+		req.ContextRef,
+		req.ContextLabel,
+		optionalTime(req.WishFrom),
+		optionalTime(req.WishUntil),
+		req.Note,
+		req.Version,
+		req.CreatedAt,
+		req.UpdatedAt,
+	); err != nil {
+		return mapWriteError("request", err)
+	}
+
+	for i, classID := range req.RequestedResourceClasses {
+		if _, err := r.q.Exec(ctx, `
+INSERT INTO request_resource_classes(request_id, position, resource_class_id)
+VALUES ($1, $2, $3)`, string(req.ID), i, string(classID)); err != nil {
+			return mapWriteError("request resource classes insert", err)
+		}
+	}
+
+	return nil
 }
 
 func (r *requestRepository) Save(ctx context.Context, req *domain.Request) error {

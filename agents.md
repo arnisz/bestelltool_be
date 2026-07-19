@@ -40,6 +40,7 @@ The project uses a strict Hexagonal Architecture. Do not violate these boundarie
 
 ## 6. Coding Style & Go Idioms
 *   **Context**: Pass `context.Context` as the first parameter to all repository and use case methods. Use it for cancellation and timeouts.
+*   **HTTP Error Contract**: REST handlers MUST return errors in the JSON envelope `{"error":{"code":"...","message":"..."}}` and map errors centrally via `errors.Is`/`errors.As` (e.g., not found → 404, conflict → 409, validation → 422, unknown → 500 without internal details).
 *   **Errors**:
     *   Never swallow errors.
     *   Use custom error types or `errors.Is`/`errors.As` for domain-specific errors (e.g., `ErrConflict`, `ErrNotFound`).

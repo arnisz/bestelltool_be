@@ -10,6 +10,7 @@ import (
 type RequestRepository interface {
 	GetByID(ctx context.Context, id domain.RequestID) (*domain.Request, error)
 	GetForUpdate(ctx context.Context, id domain.RequestID) (*domain.Request, error)
+	Create(ctx context.Context, req *domain.Request) error
 	Save(ctx context.Context, req *domain.Request) error
 }
 

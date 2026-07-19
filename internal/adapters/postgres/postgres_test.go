@@ -642,9 +642,8 @@ INSERT INTO request_resource_classes(request_id, position, resource_class_id) VA
 		State:     domain.ExecutionStateBlocked,
 		Note:      "x",
 		Audit: usecases.AuditMeta{
-			ServerRecordedAt: time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC),
-			ActorID:          "dispatcher-1",
-			ActorRole:        domain.ActorRoleDispatcher,
+			ActorID:   "dispatcher-1",
+			ActorRole: domain.ActorRoleDispatcher,
 		},
 	})
 	if err != nil {
@@ -674,9 +673,8 @@ INSERT INTO request_resource_classes(request_id, position, resource_class_id) VA
 		State:     domain.ExecutionStatePartiallyBlocked,
 		Note:      "rollback",
 		Audit: usecases.AuditMeta{
-			ServerRecordedAt: time.Date(2026, 7, 18, 11, 0, 0, 0, time.UTC),
-			ActorID:          "missing-user",
-			ActorRole:        domain.ActorRoleDispatcher,
+			ActorID:   "missing-user",
+			ActorRole: domain.ActorRoleDispatcher,
 		},
 	})
 	if err == nil {
