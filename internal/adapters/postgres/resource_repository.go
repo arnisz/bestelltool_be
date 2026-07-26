@@ -73,6 +73,50 @@ func (r *resourceRepository) get(ctx context.Context, id domain.ResourceID, lock
 	return &res, nil
 }
 
+// Create inserts a new resource. created_at/updated_at use their database
+// DEFAULT clock_timestamp() - domain.Resource does not track these columns.
+func (r *resourceRepository) Create(ctx context.Context, res *domain.Resource) error {
+	if res == nil {
+		return fmt.Errorf("resource nil: %w", ErrValidation)
+	}
+
+	metadata, err := marshalMetadata(res.Metadata)
+	if err != nil {
+		return err
+	}
+
+	var blockReason any
+	if res.BlockReason != nil {
+		blockReason = string(*res.BlockReason)
+	}
+	var holderID any
+	if res.HolderID != nil {
+		holderID = string(*res.HolderID)
+	}
+
+	if _, err := r.q.Exec(ctx, `
+INSERT INTO resources(
+    id, resource_class_id, serial_number, status, block_reason, block_note,
+    holder_id, location, valid_until, metadata, version
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		string(res.ID),
+		string(res.ResourceClassID),
+		res.SerialNumber,
+		string(res.Status),
+		blockReason,
+		res.BlockNote,
+		holderID,
+		res.Location,
+		optionalTime(res.ValidUntil),
+		metadata,
+		res.Version,
+	); err != nil {
+		return mapWriteError("resource", err)
+	}
+
+	return nil
+}
+
 func (r *resourceRepository) Save(ctx context.Context, res *domain.Resource) error {
 	if res == nil {
 		return fmt.Errorf("resource nil: %w", ErrValidation)

@@ -223,7 +223,15 @@ A successful response is `{"status":"ok"}` with HTTP status `200`. `GET /healthz
 
 ### Seed data (optional)
 
-`scripts/dev-seed.sql` inserts two example users (`dev-dispatcher`, `dev-technician`) so that requests referencing them do not fail on a foreign key. It is not applied automatically; run it against the `db` container's `resource` database if you need those rows for manual API testing.
+`cmd/seed` is a small dev-only tool that creates dummy users (technician, dispatcher, admin), one resource class and two resources (available / in-use) for manual API testing. It goes through the same `UnitOfWork` and repositories as the server, so seeded rows are exactly as valid as ones the application would create itself — no hand-written SQL. It is not run automatically; run it against the `db` container's `resource` database:
+
+```powershell
+$env:APP_ENV = "dev"
+$env:DATABASE_URL = "postgres://dev:dev@127.0.0.1:5432/resource?sslmode=disable"
+go run ./cmd/seed
+```
+
+`APP_ENV` must be `dev` — the tool refuses to run otherwise. It is safe to run more than once against the same database: an already-seeded record is logged and skipped instead of failing.
 
 ### Stop / reset
 

@@ -27,6 +27,14 @@ type txAdapter struct {
 	state *txState
 }
 
+func (t *txAdapter) Users() ports.UserRepository {
+	return &userRepository{q: t.state.q}
+}
+
+func (t *txAdapter) ResourceClasses() ports.ResourceClassRepository {
+	return &resourceClassRepository{q: t.state.q}
+}
+
 func (t *txAdapter) Requests() ports.RequestRepository {
 	return &requestRepository{q: t.state.q}
 }

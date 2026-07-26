@@ -87,9 +87,9 @@ func seedCoreRefs(t *testing.T, q interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }) {
 	t.Helper()
-	if _, err := q.Exec(t.Context(), `INSERT INTO users(id, role, display_name) VALUES
-('tech-1', 'technician', 'Tech One'),
-('dispatcher-1', 'dispatcher', 'Dispatcher One')`); err != nil {
+	if _, err := q.Exec(t.Context(), `INSERT INTO users(id, username, role, display_name) VALUES
+('tech-1', 'tech-1', 'technician', 'Tech One'),
+('dispatcher-1', 'dispatcher-1', 'dispatcher', 'Dispatcher One')`); err != nil {
 		t.Fatalf("seed users error = %v", err)
 	}
 	if _, err := q.Exec(t.Context(), `INSERT INTO resource_classes(id, name) VALUES ('rc-1', 'RC1'),('rc-2', 'RC2')`); err != nil {
@@ -655,7 +655,7 @@ func TestAuditEventsAcceptsAdminRoleAndNewEntityTypes(t *testing.T) {
 	seedCoreRefs(t, pool)
 
 	if _, err := pool.Exec(t.Context(), `
-INSERT INTO users(id, role, display_name) VALUES ('admin-1', 'admin', 'Admin One')`); err != nil {
+INSERT INTO users(id, username, role, display_name) VALUES ('admin-1', 'admin-1', 'admin', 'Admin One')`); err != nil {
 		t.Fatalf("seed admin user error = %v", err)
 	}
 
@@ -769,7 +769,7 @@ func TestTransferResourceWithPostgres(t *testing.T) {
 
 	// Seed target technician (not in seedCoreRefs)
 	if _, err := pool.Exec(t.Context(),
-		`INSERT INTO users(id, role, display_name) VALUES ('tech-2', 'technician', 'Tech Two')`); err != nil {
+		`INSERT INTO users(id, username, role, display_name) VALUES ('tech-2', 'tech-2', 'technician', 'Tech Two')`); err != nil {
 		t.Fatalf("seed tech-2 error = %v", err)
 	}
 

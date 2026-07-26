@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,7 +17,9 @@ import (
 	httpadapter "bestelltool_be/internal/adapters/http"
 	"bestelltool_be/internal/adapters/postgres"
 	"bestelltool_be/internal/adapters/sse"
+	"bestelltool_be/internal/application/ports"
 	"bestelltool_be/internal/application/usecases"
+	"bestelltool_be/internal/domain"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -109,7 +112,7 @@ func TestResourceLifecycleE2E(t *testing.T) {
 	}
 
 	// Schritt C: Es existiert aktuell kein separater HTTP-Endpunkt für reguläre Zuweisung.
-	seedDirectTransferPreconditions(t, pool, requestAID, requestBID, resourceID, oldAllocID, now)
+	seedDirectTransferPreconditions(t, uow, requestAID, requestBID, resourceID, oldAllocID, now)
 
 	// Schritt D: Dispatcher führt Direct Transfer durch.
 	transferAt := now.Add(45 * time.Minute)
@@ -327,10 +330,10 @@ func seedCoreRefs(t *testing.T, q interface {
 }) {
 	t.Helper()
 
-	if _, err := q.Exec(t.Context(), `INSERT INTO users(id, role, display_name) VALUES
-('tech-a', 'technician', 'Technician A'),
-('tech-b', 'technician', 'Technician B'),
-('dispatcher-1', 'dispatcher', 'Dispatcher One')`); err != nil {
+	if _, err := q.Exec(t.Context(), `INSERT INTO users(id, username, role, display_name) VALUES
+('tech-a', 'tech-a', 'technician', 'Technician A'),
+('tech-b', 'tech-b', 'technician', 'Technician B'),
+('dispatcher-1', 'dispatcher-1', 'dispatcher', 'Dispatcher One')`); err != nil {
 		t.Fatalf("seed users error = %v", err)
 	}
 
@@ -339,11 +342,14 @@ func seedCoreRefs(t *testing.T, q interface {
 	}
 }
 
+// seedDirectTransferPreconditions sets up the target request, the in-use resource
+// and the with_technician allocation that Schritt D (direct transfer) needs, using
+// the same UnitOfWork + repositories + domain state machine that production code
+// uses - not hand-written SQL. This keeps the fixture from drifting out of sync
+// with schema/constraint changes (see Tech Debt entry in status.md).
 func seedDirectTransferPreconditions(
 	t *testing.T,
-	q interface {
-		Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	},
+	uow ports.UnitOfWork,
 	sourceRequestID string,
 	targetRequestID string,
 	resourceID string,
@@ -352,31 +358,77 @@ func seedDirectTransferPreconditions(
 ) {
 	t.Helper()
 
-	if _, err := q.Exec(t.Context(), `
-INSERT INTO requests(id, technician_id, status, execution_state, execution_note, context_ref, context_label, wish_from, wish_until, note, version, created_at, updated_at)
-VALUES ($1, 'tech-b', 'open', 'executable', '', 'ctx-e2e-b', 'E2E B', NULL, NULL, '', 1, $2, $2)
-`, targetRequestID, now.Add(1*time.Minute)); err != nil {
-		t.Fatalf("insert target request %s error = %v", targetRequestID, err)
-	}
+	err := uow.WithinTransaction(t.Context(), func(ctx context.Context, tx ports.Transaction) error {
+		targetReq, err := domain.NewRequest(
+			domain.RequestID(targetRequestID),
+			domain.UserID("tech-b"),
+			"ctx-e2e-b",
+			"E2E B",
+			nil,
+			nil,
+			"",
+			[]domain.ResourceClassID{"rc-1"},
+			now.Add(1*time.Minute),
+		)
+		if err != nil {
+			return fmt.Errorf("build target request: %w", err)
+		}
+		if err := tx.Requests().Create(ctx, targetReq); err != nil {
+			return fmt.Errorf("create target request: %w", err)
+		}
 
-	if _, err := q.Exec(t.Context(), `
-INSERT INTO request_resource_classes(request_id, position, resource_class_id)
-VALUES ($1, 0, 'rc-1')
-`, targetRequestID); err != nil {
-		t.Fatalf("insert target request_resource_class %s error = %v", targetRequestID, err)
-	}
+		res, err := domain.NewResource(
+			domain.ResourceID(resourceID),
+			domain.ResourceClassID("rc-1"),
+			"serial-"+resourceID,
+			"site-a",
+			nil,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("build resource: %w", err)
+		}
+		// available -> reserved -> issued -> in_use, holder tech-a: the same
+		// lifecycle a real dispatch would drive the resource through.
+		if err := res.Reserve(domain.UserID("tech-a")); err != nil {
+			return fmt.Errorf("reserve resource: %w", err)
+		}
+		if err := res.MarkIssued(); err != nil {
+			return fmt.Errorf("issue resource: %w", err)
+		}
+		if err := res.MarkInUse(); err != nil {
+			return fmt.Errorf("mark resource in use: %w", err)
+		}
+		if err := tx.Resources().Create(ctx, res); err != nil {
+			return fmt.Errorf("create resource: %w", err)
+		}
 
-	if _, err := q.Exec(t.Context(), `
-INSERT INTO resources(id, resource_class_id, serial_number, status, block_reason, block_note, holder_id, location, valid_until, metadata, version, created_at, updated_at)
-VALUES ($1, 'rc-1', $2, 'in_use', NULL, '', 'tech-a', 'site-a', NULL, '{}'::jsonb, 1, $3, $3)
-`, resourceID, "serial-"+resourceID, now.Add(2*time.Minute)); err != nil {
-		t.Fatalf("insert resource %s error = %v", resourceID, err)
-	}
+		oldAlloc, err := domain.NewAllocation(
+			domain.AllocationID(oldAllocationID),
+			domain.RequestID(sourceRequestID),
+			domain.ResourceID(resourceID),
+			now.Add(3*time.Minute),
+			now.Add(3*time.Hour),
+			now.Add(3*time.Minute),
+		)
+		if err != nil {
+			return fmt.Errorf("build old allocation: %w", err)
+		}
+		// allocated -> shipped -> with_technician: matches the resource already
+		// being in_use with tech-a as holder above.
+		if err := oldAlloc.MarkShipped(now.Add(3 * time.Minute)); err != nil {
+			return fmt.Errorf("ship old allocation: %w", err)
+		}
+		if err := oldAlloc.MarkReceivedByTechnician(now.Add(3 * time.Minute)); err != nil {
+			return fmt.Errorf("receive old allocation: %w", err)
+		}
+		if err := tx.Allocations().Create(ctx, oldAlloc); err != nil {
+			return fmt.Errorf("create old allocation: %w", err)
+		}
 
-	if _, err := q.Exec(t.Context(), `
-INSERT INTO allocations(id, request_id, resource_id, status, planned_from, planned_until, return_requested_at, shipped_at, received_at, version, created_at, updated_at)
-VALUES ($1, $2, $3, 'with_technician', $4, $5, NULL, $4, $4, 2, $4, $4)
-`, oldAllocationID, sourceRequestID, resourceID, now.Add(3*time.Minute), now.Add(3*time.Hour)); err != nil {
-		t.Fatalf("insert old allocation %s error = %v", oldAllocationID, err)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seedDirectTransferPreconditions: %v", err)
 	}
 }

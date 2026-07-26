@@ -198,13 +198,20 @@ static test tokens but too narrow for real user management. Separate concerns:
 | `refresh_tokens` | Rotation lineage of refresh tokens |
 
 ```sql
+-- Implemented by migration 000007 (username/email/version added to the
+-- users table from migration 000001, which already carried id/role/
+-- display_name/is_active/created_at/updated_at). username is backfilled
+-- from id for pre-existing rows, then made NOT NULL + UNIQUE
+-- (expand/contract). version is integer, not bigint - user churn is small
+-- (~150 people plus a handful of dispatchers/admins) and will never need
+-- bigint range.
 CREATE TABLE users (
     id            text PRIMARY KEY,
     username      text        NOT NULL,
     display_name  text        NOT NULL,
     email         text,
     is_active     boolean     NOT NULL DEFAULT true,
-    version       bigint      NOT NULL DEFAULT 1,
+    version       integer     NOT NULL DEFAULT 1,
     created_at    timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at    timestamptz NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT uq_users_username UNIQUE (username)
@@ -373,19 +380,22 @@ user authenticated.
 ### 7.2 Alternative: Local Accounts
 
 ```sql
+-- Implemented by migration 000008, deliberately simplified to
+-- local-password-only for this increment: no id/provider/provider_subject
+-- (OIDC support depends on D-5, still open), no must_change_password/
+-- failed_attempts/locked_until (no Login use case exists yet to populate or
+-- enforce them - roadmap Phase 2 Punkte 10, 14). One user has at most one
+-- local identity, so user_id is the primary key directly.
 CREATE TABLE auth_identities (
-    id                    text PRIMARY KEY,
-    user_id               text        NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    provider              text        NOT NULL,          -- 'local' | 'oidc:<issuer>'
-    provider_subject      text,
-    password_hash         text,                          -- PHC string, local only
-    must_change_password  boolean     NOT NULL DEFAULT false,
-    failed_attempts       integer     NOT NULL DEFAULT 0,
-    locked_until          timestamptz,
-    created_at            timestamptz NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_auth_identity UNIQUE (provider, provider_subject)
+    user_id       text NOT NULL PRIMARY KEY REFERENCES users(id) ON DELETE RESTRICT,
+    password_hash text NOT NULL
 );
 ```
+
+The bullet points below describe the target login policy this table will
+grow into once the `Login` use case exists (roadmap Phase 2 Punkt 10);
+`must_change_password`/`failed_attempts`/`locked_until` are added in a later
+migration alongside that use case, not spoken for in advance.
 
 Password rules (SEC-02, SEC-03):
 
@@ -410,31 +420,42 @@ Password rules (SEC-02, SEC-03):
 ### 7.3 Sessions & Tokens
 
 ```sql
+-- Implemented by migration 000008, simpler than the design below for this
+-- increment. active_role is a plain text CHECK, not a roles(code) FK - the
+-- roles catalogue does not exist yet (Phase 3, migration 000009). The
+-- idle-vs-absolute expiry split, client_name and revoke_reason are deferred
+-- until Login/RefreshSession/Logout (roadmap Phase 2 Punkte 10-12) show they
+-- are actually needed - a single expires_at is enough to store today.
+-- id is the public <id> half of the rp_at_<id>.<secret> access token
+-- (Section 7.3 below); token_hash is the SHA-256 hash of <secret>.
 CREATE TABLE sessions (
-    id                text PRIMARY KEY,
-    user_id           text        NOT NULL REFERENCES users(id)  ON DELETE RESTRICT,
-    active_role       text        NOT NULL REFERENCES roles(code) ON DELETE RESTRICT,
-    client_name       text        NOT NULL DEFAULT '',
-    created_at        timestamptz NOT NULL DEFAULT clock_timestamp(),
-    last_used_at      timestamptz,
-    idle_expires_at   timestamptz NOT NULL,
-    absolute_expires_at timestamptz NOT NULL,
-    revoked_at        timestamptz,
-    revoke_reason     text        NOT NULL DEFAULT ''
+    id          uuid        PRIMARY KEY,
+    user_id     text        NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    active_role text        NOT NULL CHECK (active_role IN ('technician', 'dispatcher', 'admin')),
+    token_hash  bytea       NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at  timestamptz NOT NULL,
+    revoked_at  timestamptz,
+    CONSTRAINT uq_sessions_token_hash UNIQUE (token_hash)
 );
 
+-- Refresh-token rotation lineage uses a flat family_id instead of walking a
+-- previous_token_id chain: revoking a family for replay detection (SEC-08)
+-- is one statement, `UPDATE refresh_tokens SET revoked_at = now() WHERE
+-- family_id = $1`, not a recursive walk. successor_token_id IS NOT NULL
+-- marks a token as already consumed; there is no separate consumed_at
+-- column. id is the public <id> half of rp_rt_<id>.<secret>.
 CREATE TABLE refresh_tokens (
-    id                text PRIMARY KEY,
-    session_id        text        NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
-    token_hash        bytea       NOT NULL,
-    previous_token_id text        REFERENCES refresh_tokens(id),
-    successor_token_id text       REFERENCES refresh_tokens(id),
-    issued_at         timestamptz NOT NULL DEFAULT clock_timestamp(),
-    expires_at        timestamptz NOT NULL,
-    consumed_at       timestamptz,
-    revoked_at        timestamptz,
-    revoke_reason     text        NOT NULL DEFAULT '',
-    CONSTRAINT uq_refresh_token_hash UNIQUE (token_hash)
+    id                 uuid        PRIMARY KEY,
+    session_id         uuid        NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+    token_hash         bytea       NOT NULL,
+    family_id          uuid        NOT NULL,
+    successor_token_id uuid        REFERENCES refresh_tokens(id) ON DELETE RESTRICT,
+    created_at         timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at         timestamptz NOT NULL,
+    revoked_at         timestamptz,
+    CONSTRAINT uq_refresh_tokens_token_hash UNIQUE (token_hash),
+    CONSTRAINT uq_refresh_tokens_successor UNIQUE (successor_token_id)
 );
 ```
 
@@ -460,11 +481,15 @@ Lifetimes:
   enforced server-side.
 
 **Rotation and replay detection (SEC-08):** every refresh consumes the presented
-token and issues a new one. If a token that is already `consumed_at` is
-presented, the **entire token family and its session are revoked** and an audit
-event is written. Revoking only the presented token would leave a stolen token
-usable. RFC 9700 requires protection against refresh token replay for public
-clients; rotation with reuse detection is that protection.
+token and issues a new one. "Consumed" is `successor_token_id IS NOT NULL`
+(migration 000008 has no separate `consumed_at` column). If a token that
+already has a `successor_token_id` is presented again, the **entire token
+family and its session are revoked** and an audit event is written - one
+`UPDATE refresh_tokens SET revoked_at = now() WHERE family_id = $1`, since
+every token issued from the same login shares `family_id`. Revoking only the
+presented token would leave a stolen token usable. RFC 9700 requires
+protection against refresh token replay for public clients; rotation with
+reuse detection is that protection.
 
 **Retry grace window (decision D-2):** on a flaky mobile connection the client
 may not receive the response to a successful refresh. To avoid forcing a

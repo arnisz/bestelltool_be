@@ -44,18 +44,22 @@ func (u *fakeUoW) WithinTransaction(ctx context.Context, fn func(ctx context.Con
 }
 
 type fakeTx struct {
-	id          int
-	allocations *fakeAllocationRepo
-	requests    *fakeRequestRepo
-	resources   *fakeResourceRepo
-	audits      *fakeAuditWriter
+	id              int
+	users           *fakeUserRepo
+	resourceClasses *fakeResourceClassRepo
+	allocations     *fakeAllocationRepo
+	requests        *fakeRequestRepo
+	resources       *fakeResourceRepo
+	audits          *fakeAuditWriter
 }
 
-func (t *fakeTx) Requests() ports.RequestRepository       { return t.requests }
-func (t *fakeTx) Resources() ports.ResourceRepository     { return t.resources }
-func (t *fakeTx) Allocations() ports.AllocationRepository { return t.allocations }
-func (t *fakeTx) Audits() ports.AuditWriter               { return t.audits }
-func (t *fakeTx) Idempotency() ports.IdempotencyStore     { return nil }
+func (t *fakeTx) Users() ports.UserRepository                    { return t.users }
+func (t *fakeTx) ResourceClasses() ports.ResourceClassRepository { return t.resourceClasses }
+func (t *fakeTx) Requests() ports.RequestRepository              { return t.requests }
+func (t *fakeTx) Resources() ports.ResourceRepository            { return t.resources }
+func (t *fakeTx) Allocations() ports.AllocationRepository        { return t.allocations }
+func (t *fakeTx) Audits() ports.AuditWriter                      { return t.audits }
+func (t *fakeTx) Idempotency() ports.IdempotencyStore            { return nil }
 
 type fakeAllocationRepo struct {
 	items        map[domain.AllocationID]*domain.Allocation
@@ -125,9 +129,11 @@ func (r *fakeRequestRepo) Save(ctx context.Context, req *domain.Request) error {
 }
 
 type fakeResourceRepo struct {
-	items      map[domain.ResourceID]*domain.Resource
-	saves      int
-	savedTxIDs []int
+	items        map[domain.ResourceID]*domain.Resource
+	saves        int
+	savedTxIDs   []int
+	creates      int
+	createdTxIDs []int
 }
 
 func (r *fakeResourceRepo) GetByID(_ context.Context, id domain.ResourceID) (*domain.Resource, error) {
@@ -138,11 +144,45 @@ func (r *fakeResourceRepo) GetForUpdate(_ context.Context, id domain.ResourceID)
 	return r.items[id], nil
 }
 
+func (r *fakeResourceRepo) Create(ctx context.Context, res *domain.Resource) error {
+	txID, _ := ctx.Value(txContextKey{}).(int)
+	r.creates++
+	r.createdTxIDs = append(r.createdTxIDs, txID)
+	r.items[res.ID] = res
+	return nil
+}
+
 func (r *fakeResourceRepo) Save(ctx context.Context, res *domain.Resource) error {
 	txID, _ := ctx.Value(txContextKey{}).(int)
 	r.saves++
 	r.savedTxIDs = append(r.savedTxIDs, txID)
 	r.items[res.ID] = res
+	return nil
+}
+
+type fakeUserRepo struct {
+	items map[domain.UserID]*domain.User
+}
+
+func (r *fakeUserRepo) GetByID(_ context.Context, id domain.UserID) (*domain.User, error) {
+	return r.items[id], nil
+}
+
+func (r *fakeUserRepo) Create(_ context.Context, u *domain.User) error {
+	r.items[u.ID] = u
+	return nil
+}
+
+type fakeResourceClassRepo struct {
+	items map[domain.ResourceClassID]*domain.ResourceClass
+}
+
+func (r *fakeResourceClassRepo) GetByID(_ context.Context, id domain.ResourceClassID) (*domain.ResourceClass, error) {
+	return r.items[id], nil
+}
+
+func (r *fakeResourceClassRepo) Create(_ context.Context, rc *domain.ResourceClass) error {
+	r.items[rc.ID] = rc
 	return nil
 }
 
@@ -326,10 +366,12 @@ func TestReactivateResourceExecuteSuccess(t *testing.T) {
 func newFakeTx(t *testing.T) *fakeTx {
 	t.Helper()
 	return &fakeTx{
-		allocations: &fakeAllocationRepo{items: map[domain.AllocationID]*domain.Allocation{}},
-		requests:    &fakeRequestRepo{items: map[domain.RequestID]*domain.Request{}},
-		resources:   &fakeResourceRepo{items: map[domain.ResourceID]*domain.Resource{}},
-		audits:      &fakeAuditWriter{},
+		users:           &fakeUserRepo{items: map[domain.UserID]*domain.User{}},
+		resourceClasses: &fakeResourceClassRepo{items: map[domain.ResourceClassID]*domain.ResourceClass{}},
+		allocations:     &fakeAllocationRepo{items: map[domain.AllocationID]*domain.Allocation{}},
+		requests:        &fakeRequestRepo{items: map[domain.RequestID]*domain.Request{}},
+		resources:       &fakeResourceRepo{items: map[domain.ResourceID]*domain.Resource{}},
+		audits:          &fakeAuditWriter{},
 	}
 }
 

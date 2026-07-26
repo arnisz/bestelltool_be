@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -67,6 +68,15 @@ func run() error {
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
 	}
+
+	// SEC-06: log only the resolved config shape, never a secret. AUTH_STATIC_TOKENS
+	// and any DATABASE_URL credential must never reach this call, by omission -
+	// not by masking a value that was already collected here.
+	slog.Info("server starting",
+		"app_env", cfg.AppEnv,
+		"http_addr", cfg.HTTPAddr,
+		"run_migrations", cfg.RunMigrations,
+	)
 
 	serveErr := make(chan error, 1)
 	go func() {

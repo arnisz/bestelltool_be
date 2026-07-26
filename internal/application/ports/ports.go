@@ -17,6 +17,18 @@ type Authenticator interface {
 	Authenticate(ctx context.Context, token string) (*Principal, error)
 }
 
+// UserRepository provides persistence access for users.
+type UserRepository interface {
+	GetByID(ctx context.Context, id domain.UserID) (*domain.User, error)
+	Create(ctx context.Context, u *domain.User) error
+}
+
+// ResourceClassRepository provides persistence access for resource classes.
+type ResourceClassRepository interface {
+	GetByID(ctx context.Context, id domain.ResourceClassID) (*domain.ResourceClass, error)
+	Create(ctx context.Context, rc *domain.ResourceClass) error
+}
+
 // RequestRepository provides persistence access for requests.
 type RequestRepository interface {
 	GetByID(ctx context.Context, id domain.RequestID) (*domain.Request, error)
@@ -29,6 +41,7 @@ type RequestRepository interface {
 type ResourceRepository interface {
 	GetByID(ctx context.Context, id domain.ResourceID) (*domain.Resource, error)
 	GetForUpdate(ctx context.Context, id domain.ResourceID) (*domain.Resource, error)
+	Create(ctx context.Context, res *domain.Resource) error
 	Save(ctx context.Context, res *domain.Resource) error
 }
 
@@ -60,6 +73,8 @@ type IdempotencyStore interface {
 
 // Transaction provides transaction-bound repositories and writers.
 type Transaction interface {
+	Users() UserRepository
+	ResourceClasses() ResourceClassRepository
 	Requests() RequestRepository
 	Resources() ResourceRepository
 	Allocations() AllocationRepository
