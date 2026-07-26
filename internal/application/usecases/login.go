@@ -22,7 +22,7 @@ const (
 
 	// Session and token lifetimes
 	defaultAccessTokenTTL  = 15 * time.Minute
-	defaultRefreshTokenTTL = 7 * 24 * time.Hour
+	defaultRefreshTokenTTL = 30 * 24 * time.Hour
 )
 
 // LoginInput represents login credentials.
