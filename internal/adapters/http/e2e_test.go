@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -352,6 +354,335 @@ INSERT INTO user_roles(user_id, role_code, assigned_by) VALUES
 	}
 	if revokedAt == nil {
 		t.Fatalf("session %s with active role %q was not revoked after active role removal", sessionID, activeRole)
+	}
+}
+
+func TestLoginRefreshSuccessAndAccessTokenExpiresByAccessTTL_E2E(t *testing.T) {
+	pool := e2eTestPool(t)
+	now := time.Date(2026, time.July, 26, 18, 0, 0, 0, time.UTC)
+	clock := &e2eClock{now: now}
+	uow := postgres.NewUnitOfWork(pool)
+
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO users(id, username, role, display_name, is_active)
+VALUES ('refresh-user', 'refresh-user', 'technician', 'Refresh User', true);
+INSERT INTO user_roles(user_id, role_code, assigned_by)
+VALUES ('refresh-user', 'technician', 'system-bootstrap');`); err != nil {
+		t.Fatalf("seed refresh user error = %v", err)
+	}
+
+	passwordHasher := authadapter.NewArgon2Hasher(authadapter.DefaultArgon2Config())
+	passwordHash, err := passwordHasher.Hash("correct-password")
+	if err != nil {
+		t.Fatalf("hash password error = %v", err)
+	}
+	if err := uow.WithinTransaction(t.Context(), func(ctx context.Context, tx ports.Transaction) error {
+		return tx.AuthIdentities().Save(ctx, &ports.AuthIdentity{UserID: "refresh-user", PasswordHash: passwordHash})
+	}); err != nil {
+		t.Fatalf("seed auth identity error = %v", err)
+	}
+
+	secretGenerator := authadapter.NewSecretGenerator(authadapter.DefaultTokenConfig())
+	encryptor, err := authadapter.NewTokenEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("NewTokenEncryptor() error = %v", err)
+	}
+	login := usecases.NewLoginUseCase(uow, passwordHasher, secretGenerator, clock)
+	refresh := usecases.NewRefreshSessionUseCase(uow, secretGenerator, encryptor, clock)
+	authenticator := authadapter.NewSessionAuthenticator(uow, postgres.NewPermissionResolver(pool), clock, 0)
+	h := httpadapter.NewHandlerWithEventStreamAndAuthenticationAndSecurity(
+		authenticator,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		login,
+		refresh,
+		usecases.NewLogoutUseCase(uow, clock),
+		usecases.NewChangeOwnPasswordUseCase(uow, passwordHasher, clock),
+		httpadapter.NewRateLimiter(10, time.Minute, false, clock.Now),
+		usecases.NewSwitchActiveRoleUseCase(uow, secretGenerator, clock),
+		usecases.NewGetMeUseCase(uow),
+	)
+	server := httptest.NewServer(h)
+	t.Cleanup(server.Close)
+
+	loginResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]string{"username": "refresh-user", "password": "correct-password"})
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", loginResp.StatusCode)
+	}
+	var loginTokens struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decodeJSONResponse(t, loginResp, &loginTokens)
+
+	refreshResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/refresh", "", map[string]string{"refresh_token": loginTokens.RefreshToken})
+	if refreshResp.StatusCode != http.StatusOK {
+		t.Fatalf("refresh status = %d, want 200", refreshResp.StatusCode)
+	}
+	var refreshed struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decodeJSONResponse(t, refreshResp, &refreshed)
+	if refreshed.AccessToken == "" || refreshed.RefreshToken == "" {
+		t.Fatalf("refresh response = %+v, want non-empty tokens", refreshed)
+	}
+
+	meOK := doJSONRequest(t, server.Client(), http.MethodGet, server.URL+"/api/v1/auth/me", refreshed.AccessToken, nil)
+	if meOK.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/auth/me with fresh token status = %d, want 200", meOK.StatusCode)
+	}
+
+	clock.now = clock.now.Add(15*time.Minute + time.Second)
+	meExpired := doJSONRequest(t, server.Client(), http.MethodGet, server.URL+"/api/v1/auth/me", refreshed.AccessToken, nil)
+	if meExpired.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/v1/auth/me with expired token status = %d, want 401", meExpired.StatusCode)
+	}
+	var expiredErr errorEnvelope
+	decodeJSONResponse(t, meExpired, &expiredErr)
+	if expiredErr.Error.Code != "unauthenticated" {
+		t.Fatalf("expired token error code = %q, want unauthenticated", expiredErr.Error.Code)
+	}
+}
+
+func TestRefreshConcurrentConsumedPredecessorAndSuccessorNoDeadlock_SEC08(t *testing.T) {
+	pool := e2eTestPool(t)
+	now := time.Date(2026, time.July, 26, 19, 0, 0, 0, time.UTC)
+	clock := &e2eClock{now: now}
+	uow := postgres.NewUnitOfWork(pool)
+
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO users(id, username, role, display_name, is_active)
+VALUES ('race-user', 'race-user', 'technician', 'Race User', true);
+INSERT INTO user_roles(user_id, role_code, assigned_by)
+VALUES ('race-user', 'technician', 'system-bootstrap');`); err != nil {
+		t.Fatalf("seed race user error = %v", err)
+	}
+
+	passwordHasher := authadapter.NewArgon2Hasher(authadapter.DefaultArgon2Config())
+	passwordHash, err := passwordHasher.Hash("correct-password")
+	if err != nil {
+		t.Fatalf("hash password error = %v", err)
+	}
+	if err := uow.WithinTransaction(t.Context(), func(ctx context.Context, tx ports.Transaction) error {
+		return tx.AuthIdentities().Save(ctx, &ports.AuthIdentity{UserID: "race-user", PasswordHash: passwordHash})
+	}); err != nil {
+		t.Fatalf("seed auth identity error = %v", err)
+	}
+
+	secretGenerator := authadapter.NewSecretGenerator(authadapter.DefaultTokenConfig())
+	encryptor, err := authadapter.NewTokenEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("NewTokenEncryptor() error = %v", err)
+	}
+	login := usecases.NewLoginUseCase(uow, passwordHasher, secretGenerator, clock)
+	refresh := usecases.NewRefreshSessionUseCase(uow, secretGenerator, encryptor, clock)
+	authenticator := authadapter.NewSessionAuthenticator(uow, postgres.NewPermissionResolver(pool), clock, 0)
+	h := httpadapter.NewHandlerWithEventStreamAndAuthenticationAndSecurity(
+		authenticator,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		login,
+		refresh,
+		usecases.NewLogoutUseCase(uow, clock),
+		usecases.NewChangeOwnPasswordUseCase(uow, passwordHasher, clock),
+		httpadapter.NewRateLimiter(10, time.Minute, false, clock.Now),
+		usecases.NewSwitchActiveRoleUseCase(uow, secretGenerator, clock),
+		usecases.NewGetMeUseCase(uow),
+	)
+	server := httptest.NewServer(h)
+	t.Cleanup(server.Close)
+
+	loginResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]string{"username": "race-user", "password": "correct-password"})
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", loginResp.StatusCode)
+	}
+	var firstTokens struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decodeJSONResponse(t, loginResp, &firstTokens)
+
+	firstRefreshResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/refresh", "", map[string]string{"refresh_token": firstTokens.RefreshToken})
+	if firstRefreshResp.StatusCode != http.StatusOK {
+		t.Fatalf("first refresh status = %d, want 200", firstRefreshResp.StatusCode)
+	}
+	var successorTokens struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decodeJSONResponse(t, firstRefreshResp, &successorTokens)
+
+	clock.now = clock.now.Add(31 * time.Second)
+
+	type refreshResult struct {
+		status int
+		body   []byte
+		err    error
+	}
+	callRefresh := func(refreshToken string) refreshResult {
+		payload, err := json.Marshal(map[string]string{"refresh_token": refreshToken})
+		if err != nil {
+			return refreshResult{err: err}
+		}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/api/v1/auth/refresh", bytes.NewReader(payload))
+		if err != nil {
+			return refreshResult{err: err}
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := *server.Client()
+		client.Timeout = 5 * time.Second
+		resp, err := client.Do(req)
+		if err != nil {
+			return refreshResult{err: err}
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return refreshResult{err: err}
+		}
+		return refreshResult{status: resp.StatusCode, body: body}
+	}
+
+	start := make(chan struct{})
+	results := make([]refreshResult, 2)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-start
+		results[0] = callRefresh(firstTokens.RefreshToken)
+	})
+	wg.Go(func() {
+		<-start
+		results[1] = callRefresh(successorTokens.RefreshToken)
+	})
+	close(start)
+	wg.Wait()
+
+	statusCount := map[int]int{}
+	for i, result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent refresh call %d error = %v", i, result.err)
+		}
+		statusCount[result.status]++
+		if result.status == http.StatusInternalServerError {
+			t.Fatalf("concurrent refresh call %d returned 500 body=%s", i, string(result.body))
+		}
+	}
+	if statusCount[http.StatusUnauthorized] == 0 {
+		t.Fatalf("concurrent refresh statuses = %+v, want at least one 401", statusCount)
+	}
+	if statusCount[http.StatusOK]+statusCount[http.StatusUnauthorized] != 2 {
+		t.Fatalf("concurrent refresh statuses = %+v, want only 200/401 outcomes", statusCount)
+	}
+}
+
+func TestRefreshRoleRemovalConcurrentWithRefreshPreventsNewTokens_SEC14(t *testing.T) {
+	pool := e2eTestPool(t)
+	now := time.Date(2026, time.July, 26, 20, 0, 0, 0, time.UTC)
+	clock := &e2eClock{now: now}
+	uow := postgres.NewUnitOfWork(pool)
+
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO users(id, username, role, display_name, is_active)
+VALUES ('toctou-user', 'toctou-user', 'technician', 'TOCTOU User', true);
+INSERT INTO user_roles(user_id, role_code, assigned_by)
+VALUES ('toctou-user', 'technician', 'system-bootstrap');`); err != nil {
+		t.Fatalf("seed toctou user error = %v", err)
+	}
+
+	passwordHasher := authadapter.NewArgon2Hasher(authadapter.DefaultArgon2Config())
+	passwordHash, err := passwordHasher.Hash("correct-password")
+	if err != nil {
+		t.Fatalf("hash password error = %v", err)
+	}
+	if err := uow.WithinTransaction(t.Context(), func(ctx context.Context, tx ports.Transaction) error {
+		return tx.AuthIdentities().Save(ctx, &ports.AuthIdentity{UserID: "toctou-user", PasswordHash: passwordHash})
+	}); err != nil {
+		t.Fatalf("seed auth identity error = %v", err)
+	}
+
+	secretGenerator := authadapter.NewSecretGenerator(authadapter.DefaultTokenConfig())
+	encryptor, err := authadapter.NewTokenEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("NewTokenEncryptor() error = %v", err)
+	}
+	login := usecases.NewLoginUseCase(uow, passwordHasher, secretGenerator, clock)
+	refresh := usecases.NewRefreshSessionUseCase(uow, secretGenerator, encryptor, clock)
+	authenticator := authadapter.NewSessionAuthenticator(uow, postgres.NewPermissionResolver(pool), clock, 0)
+	h := httpadapter.NewHandlerWithEventStreamAndAuthenticationAndSecurity(
+		authenticator,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		login,
+		refresh,
+		usecases.NewLogoutUseCase(uow, clock),
+		usecases.NewChangeOwnPasswordUseCase(uow, passwordHasher, clock),
+		httpadapter.NewRateLimiter(10, time.Minute, false, clock.Now),
+		usecases.NewSwitchActiveRoleUseCase(uow, secretGenerator, clock),
+		usecases.NewGetMeUseCase(uow),
+	)
+	server := httptest.NewServer(h)
+	t.Cleanup(server.Close)
+
+	loginResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]string{"username": "toctou-user", "password": "correct-password"})
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", loginResp.StatusCode)
+	}
+	var tokens struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decodeJSONResponse(t, loginResp, &tokens)
+
+	refreshTokenID := strings.TrimPrefix(tokens.RefreshToken, "rp_rt_")
+	refreshTokenID = strings.Split(refreshTokenID, ".")[0]
+	var sessionID string
+	if err := pool.QueryRow(t.Context(), `SELECT session_id FROM refresh_tokens WHERE id = $1`, refreshTokenID).Scan(&sessionID); err != nil {
+		t.Fatalf("find refresh token session error = %v", err)
+	}
+
+	txDelete, err := pool.BeginTx(t.Context(), pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin delete tx error = %v", err)
+	}
+	t.Cleanup(func() { _ = txDelete.Rollback(t.Context()) })
+	if _, err := txDelete.Exec(t.Context(), `SELECT 1 FROM user_roles WHERE user_id = 'toctou-user' AND role_code = 'technician' FOR UPDATE`); err != nil {
+		t.Fatalf("lock role row for delete error = %v", err)
+	}
+
+	refreshDone := make(chan *http.Response, 1)
+	go func() {
+		refreshDone <- doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/refresh", "", map[string]string{"refresh_token": tokens.RefreshToken})
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if _, err := txDelete.Exec(t.Context(), `DELETE FROM user_roles WHERE user_id = 'toctou-user' AND role_code = 'technician'`); err != nil {
+		t.Fatalf("delete role row error = %v", err)
+	}
+	if err := txDelete.Commit(t.Context()); err != nil {
+		t.Fatalf("commit role delete tx error = %v", err)
+	}
+
+	refreshResp := <-refreshDone
+	if refreshResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("refresh during concurrent role removal status = %d, want 401", refreshResp.StatusCode)
+	}
+
+	var tokenCount int
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM refresh_tokens WHERE session_id = $1`, sessionID).Scan(&tokenCount); err != nil {
+		t.Fatalf("count refresh tokens for session error = %v", err)
+	}
+	if tokenCount != 1 {
+		t.Fatalf("refresh token count for session = %d, want 1 (no newly issued token)", tokenCount)
 	}
 }
 

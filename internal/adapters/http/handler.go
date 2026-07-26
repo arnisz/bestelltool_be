@@ -265,7 +265,7 @@ func NewHandlerWithEventStreamAndAuthenticationAndSecurity(
 
 // NewHandlerWithClock builds the HTTP adapter and allows deterministic tests.
 // All /api/v1/* routes are protected by the auth middleware followed by per-route
-// role checks via requireRoles. Unprotected routes (e.g. GET /health) must be
+// authorization wrappers. Unprotected routes (e.g. GET /health) must be
 // registered on the outer mux in main.go — they are intentionally outside this function.
 func NewHandlerWithClock(
 	auth Authenticator,
@@ -406,32 +406,6 @@ func registerAnyPermission(mux *http.ServeMux, routes *routeRegistry, method, pa
 func registerSelfService(mux *http.ServeMux, routes *routeRegistry, method, pattern string, next http.Handler) {
 	routes.routes = append(routes.routes, routeDescriptor{Method: method, Pattern: pattern, Kind: routeAuthorizationSelfService})
 	mux.Handle(method+" "+pattern, requireAuthenticated()(next))
-}
-
-// requireRoles returns a middleware that enforces one of the allowed roles on the
-// authenticated Principal. MUST be applied after authMiddleware.
-//
-//   - Missing Principal → 500 (programming error — middleware chain incorrectly wired).
-//   - Correct role → next handler is called with the unchanged context.
-//   - Wrong role → 403 Forbidden.
-func requireRoles(allowed ...domain.ActorRole) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p, ok := PrincipalFromContext(r.Context())
-			if !ok {
-				// Programming error: auth middleware was bypassed.
-				writeMappedError(w, fmt.Errorf("principal not in context: programming error"))
-				return
-			}
-			for _, role := range allowed {
-				if p.Role == role {
-					next.ServeHTTP(w, r)
-					return
-				}
-			}
-			writeMappedError(w, ports.ErrForbidden)
-		})
-	}
 }
 
 // requirePermissions returns middleware that requires all declared permissions.

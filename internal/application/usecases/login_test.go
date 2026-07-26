@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -66,11 +67,19 @@ func (r *fakeAuthIdentityRepository) Save(ctx context.Context, identity *ports.A
 }
 
 type fakeSessionRepository struct {
-	sessions map[string]*ports.Session
-	err      error
+	sessions     map[string]*ports.Session
+	err          error
+	saveErr      error
+	updateErr    error
+	getErr       error
+	revokeErr    error
+	revokeAllErr error
 }
 
 func (r *fakeSessionRepository) Save(ctx context.Context, session *ports.Session) error {
+	if r.saveErr != nil {
+		return r.saveErr
+	}
 	if r.err != nil {
 		return r.err
 	}
@@ -79,10 +88,20 @@ func (r *fakeSessionRepository) Save(ctx context.Context, session *ports.Session
 }
 
 func (r *fakeSessionRepository) Update(ctx context.Context, session *ports.Session) error {
-	return r.Save(ctx, session)
+	if r.updateErr != nil {
+		return r.updateErr
+	}
+	if r.err != nil {
+		return r.err
+	}
+	r.sessions[session.ID] = session
+	return nil
 }
 
 func (r *fakeSessionRepository) GetByID(ctx context.Context, id string) (*ports.Session, error) {
+	if r.getErr != nil {
+		return nil, r.getErr
+	}
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -103,6 +122,9 @@ func (r *fakeSessionRepository) GetForUpdate(ctx context.Context, id string) (*p
 }
 
 func (r *fakeSessionRepository) Revoke(ctx context.Context, id string, at time.Time) error {
+	if r.revokeErr != nil {
+		return r.revokeErr
+	}
 	if r.err != nil {
 		return r.err
 	}
@@ -113,6 +135,9 @@ func (r *fakeSessionRepository) Revoke(ctx context.Context, id string, at time.T
 }
 
 func (r *fakeSessionRepository) RevokeAllForUserExcept(ctx context.Context, userID domain.UserID, exceptSessionID string, at time.Time) error {
+	if r.revokeAllErr != nil {
+		return r.revokeAllErr
+	}
 	if r.err != nil {
 		return r.err
 	}
@@ -289,12 +314,23 @@ func (tx *fakeTransaction) Idempotency() ports.IdempotencyStore {
 }
 
 type fakeUserRoleRepository struct {
-	roles []domain.ActorRole
-	err   error
+	roles            []domain.ActorRole
+	err              error
+	hasRoleForUpdate *bool
 }
 
 func (r *fakeUserRoleRepository) RolesForUser(context.Context, domain.UserID) ([]domain.ActorRole, error) {
 	return r.roles, r.err
+}
+
+func (r *fakeUserRoleRepository) HasRoleForUpdate(_ context.Context, _ domain.UserID, role domain.ActorRole) (bool, error) {
+	if r.err != nil {
+		return false, r.err
+	}
+	if r.hasRoleForUpdate != nil {
+		return *r.hasRoleForUpdate, nil
+	}
+	return slices.Contains(r.roles, role), nil
 }
 
 type fakeUnitOfWork struct {
@@ -686,6 +722,59 @@ func TestLoginDisabledUser(t *testing.T) {
 	}
 	if len(tx.refreshTokens.tokens) != 0 {
 		t.Error("RefreshToken should not be created for disabled user")
+	}
+}
+
+func TestLoginRevokedLegacyRoleUsesCredentialsInvalidPath(t *testing.T) {
+	now := time.Now()
+	clock := &fakeClock{now: now}
+
+	user, _ := domain.NewUser(
+		"user-123",
+		"legacy-role-user",
+		domain.ActorRoleDispatcher,
+		"Legacy Role User",
+		nil,
+		now,
+	)
+
+	authID := &ports.AuthIdentity{UserID: user.ID, PasswordHash: "fake-hash-of-correct-password"}
+
+	tx := &fakeTransaction{
+		users: &fakeUserRepository{
+			users:      map[domain.UserID]*domain.User{user.ID: user},
+			byUsername: map[string]*domain.User{"legacy-role-user": user},
+		},
+		authIds:       &fakeAuthIdentityRepository{identities: map[domain.UserID]*ports.AuthIdentity{user.ID: authID}},
+		sessions:      &fakeSessionRepository{sessions: make(map[string]*ports.Session)},
+		refreshTokens: &fakeRefreshTokenRepository{tokens: make(map[string]*ports.RefreshToken)},
+		userRoles:     &fakeUserRoleRepository{roles: []domain.ActorRole{domain.ActorRoleTechnician}},
+	}
+
+	uc := NewLoginUseCaseWithTTLs(
+		&fakeUnitOfWork{tx: tx},
+		&fakePasswordHasher{correctPassword: "correct-password", correctHash: authID.PasswordHash},
+		&fakeSecretGenerator{tokens: []string{"access-secret", "refresh-secret"}},
+		clock,
+		15*time.Minute,
+		7*24*time.Hour,
+	)
+
+	output, err := uc.Execute(t.Context(), LoginInput{Username: "legacy-role-user", Password: "correct-password"})
+	if !errors.Is(err, ports.ErrCredentialsInvalid) {
+		t.Fatalf("Execute() error = %v, want ErrCredentialsInvalid", err)
+	}
+	if output != nil {
+		t.Fatalf("output = %+v, want nil", output)
+	}
+	if len(tx.sessions.sessions) != 0 || len(tx.refreshTokens.tokens) != 0 {
+		t.Fatalf("legacy-role mismatch created auth artifacts: sessions=%d refresh=%d", len(tx.sessions.sessions), len(tx.refreshTokens.tokens))
+	}
+	if tx.audits == nil || len(tx.audits.events) != 1 {
+		t.Fatalf("failed login audit event count = %d, want 1", len(tx.audits.events))
+	}
+	if got := tx.audits.events[0].Action; got != string(domain.ActionAuthLoginFailed) {
+		t.Fatalf("failed login audit action = %q, want %q", got, domain.ActionAuthLoginFailed)
 	}
 }
 

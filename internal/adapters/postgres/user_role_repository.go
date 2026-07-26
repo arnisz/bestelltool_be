@@ -2,9 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"bestelltool_be/internal/domain"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type userRoleRepository struct {
@@ -30,4 +33,22 @@ func (r *userRoleRepository) RolesForUser(ctx context.Context, userID domain.Use
 		return nil, fmt.Errorf("iterate user roles: %w", err)
 	}
 	return roles, nil
+}
+
+func (r *userRoleRepository) HasRoleForUpdate(ctx context.Context, userID domain.UserID, role domain.ActorRole) (bool, error) {
+	row := r.q.QueryRow(ctx, `
+SELECT 1
+FROM user_roles
+WHERE user_id = $1 AND role_code = $2
+FOR UPDATE`, string(userID), string(role))
+
+	var found int
+	if err := row.Scan(&found); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("query user role for update: %w", err)
+	}
+
+	return true, nil
 }

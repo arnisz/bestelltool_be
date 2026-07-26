@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -60,28 +59,39 @@ func (uc *RefreshSessionUseCase) Execute(ctx context.Context, in RefreshSessionI
 		roleRevoked bool
 	)
 	err = uc.uow.WithinTransaction(ctx, func(ctx context.Context, tx ports.Transaction) error {
-		presented, err := tx.RefreshTokens().GetForUpdate(ctx, id)
-		if err != nil || presented == nil || subtle.ConstantTimeCompare(hash[:], presented.TokenHash) != 1 {
+		navigatedToken, err := tx.RefreshTokens().GetByID(ctx, id)
+		if err != nil || navigatedToken == nil {
 			return ports.ErrTokenInvalid
 		}
-		session, err := tx.Sessions().GetForUpdate(ctx, presented.SessionID)
-		if err != nil || session == nil || session.RevokedAt != nil {
+		navigatedSession, err := tx.Sessions().GetByID(ctx, navigatedToken.SessionID)
+		if err != nil || navigatedSession == nil {
+			return ports.ErrTokenInvalid
+		}
+		roleHeld, err := tx.UserRoles().HasRoleForUpdate(ctx, navigatedSession.UserID, navigatedSession.ActiveRole)
+		if err != nil {
+			return fmt.Errorf("lock active role assignment: %w", err)
+		}
+		session, err := tx.Sessions().GetForUpdate(ctx, navigatedToken.SessionID)
+		if err != nil || session == nil {
+			return ports.ErrTokenInvalid
+		}
+		if session.UserID != navigatedSession.UserID || session.ActiveRole != navigatedSession.ActiveRole || session.RevokedAt != nil {
 			return ports.ErrTokenInvalid
 		}
 		now := uc.clock.Now()
 		if !now.Before(session.ExpiresAt) {
 			return ports.ErrTokenExpired
 		}
-		roles, err := tx.UserRoles().RolesForUser(ctx, session.UserID)
-		if err != nil {
-			return fmt.Errorf("load active role assignments: %w", err)
-		}
-		if !slices.Contains(roles, session.ActiveRole) {
+		if !roleHeld {
 			if err := tx.Sessions().Revoke(ctx, session.ID, now); err != nil {
 				return fmt.Errorf("revoke session with unheld active role: %w", err)
 			}
+			meta := AuditMeta{ActorID: session.UserID, ActorRole: session.ActiveRole, Note: "active_role_no_longer_held"}
+			if err := validateAuditMeta(meta); err != nil {
+				return err
+			}
 			event := newAuditEvent(
-				AuditMeta{ActorID: session.UserID, ActorRole: session.ActiveRole, Note: "active_role_no_longer_held"},
+				meta,
 				domain.EntityTypeSession,
 				session.ID,
 				string(domain.ActionSessionRevoke),
@@ -93,6 +103,13 @@ func (uc *RefreshSessionUseCase) Execute(ctx context.Context, in RefreshSessionI
 			}
 			roleRevoked = true
 			return nil
+		}
+		presented, err := tx.RefreshTokens().GetForUpdate(ctx, id)
+		if err != nil || presented == nil {
+			return ports.ErrTokenInvalid
+		}
+		if presented.SessionID != session.ID || subtle.ConstantTimeCompare(hash[:], presented.TokenHash) != 1 {
+			return ports.ErrTokenInvalid
 		}
 		if presented.SuccessorTokenID != nil {
 			successor, err := tx.RefreshTokens().GetByID(ctx, *presented.SuccessorTokenID)
@@ -110,7 +127,7 @@ func (uc *RefreshSessionUseCase) Execute(ctx context.Context, in RefreshSessionI
 					return err
 				}
 				session.TokenHash = accessHash
-				session.ExpiresAt = now.Add(uc.refreshTokenTTL)
+				session.ExpiresAt = now.Add(uc.accessTokenTTL)
 				if err := tx.Sessions().Update(ctx, session); err != nil {
 					return fmt.Errorf("update session access token: %w", err)
 				}
@@ -147,21 +164,25 @@ func (uc *RefreshSessionUseCase) Execute(ctx context.Context, in RefreshSessionI
 		if err != nil {
 			return fmt.Errorf("encrypt refresh successor: %w", err)
 		}
+		refreshHash := sha256.Sum256([]byte(refreshSecret))
+		if err := tx.RefreshTokens().Save(ctx, &ports.RefreshToken{ID: refreshID, SessionID: session.ID, TokenHash: refreshHash[:], FamilyID: presented.FamilyID, CreatedAt: now, ExpiresAt: now.Add(uc.refreshTokenTTL)}); err != nil {
+			return fmt.Errorf("save rotated refresh token: %w", err)
+		}
 		presented.SuccessorTokenID = &refreshID
 		presented.EncryptedSuccessor = encryptedSuccessor
 		if err := tx.RefreshTokens().Update(ctx, presented); err != nil {
 			return fmt.Errorf("consume refresh token: %w", err)
 		}
-		refreshHash := sha256.Sum256([]byte(refreshSecret))
-		if err := tx.RefreshTokens().Save(ctx, &ports.RefreshToken{ID: refreshID, SessionID: session.ID, TokenHash: refreshHash[:], FamilyID: presented.FamilyID, CreatedAt: now, ExpiresAt: now.Add(uc.refreshTokenTTL)}); err != nil {
-			return fmt.Errorf("save rotated refresh token: %w", err)
-		}
 		session.TokenHash = accessHash
-		session.ExpiresAt = now.Add(uc.refreshTokenTTL)
+		session.ExpiresAt = now.Add(uc.accessTokenTTL)
 		if err := tx.Sessions().Update(ctx, session); err != nil {
 			return fmt.Errorf("update session access token: %w", err)
 		}
-		event := newAuditEvent(AuditMeta{ActorID: session.UserID, ActorRole: session.ActiveRole}, domain.EntityTypeSession, session.ID, string(domain.ActionSessionRefresh), "active", "active")
+		meta := AuditMeta{ActorID: session.UserID, ActorRole: session.ActiveRole}
+		if err := validateAuditMeta(meta); err != nil {
+			return err
+		}
+		event := newAuditEvent(meta, domain.EntityTypeSession, session.ID, string(domain.ActionSessionRefresh), "active", "active")
 		if err := tx.AuditEvents().RecordEvent(ctx, event); err != nil {
 			return fmt.Errorf("record refresh audit event: %w", err)
 		}
@@ -208,7 +229,11 @@ func (uc *RefreshSessionUseCase) revokeReplay(ctx context.Context, tx ports.Tran
 	if err := tx.Sessions().Revoke(ctx, session.ID, now); err != nil {
 		return fmt.Errorf("revoke replayed session: %w", err)
 	}
-	event := newAuditEvent(AuditMeta{ActorID: session.UserID, ActorRole: session.ActiveRole}, domain.EntityTypeSession, session.ID, string(domain.ActionSessionReplayDetected), "active", "revoked")
+	meta := AuditMeta{ActorID: session.UserID, ActorRole: session.ActiveRole}
+	if err := validateAuditMeta(meta); err != nil {
+		return err
+	}
+	event := newAuditEvent(meta, domain.EntityTypeSession, session.ID, string(domain.ActionSessionReplayDetected), "active", "revoked")
 	if err := tx.AuditEvents().RecordEvent(ctx, event); err != nil {
 		return fmt.Errorf("record replay audit event: %w", err)
 	}

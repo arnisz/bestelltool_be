@@ -3,7 +3,6 @@ package usecases
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	"bestelltool_be/internal/application/ports"
@@ -38,27 +37,37 @@ func NewSwitchActiveRoleUseCase(uow ports.UnitOfWork, secretGenerator ports.Secr
 func (uc *SwitchActiveRoleUseCase) Execute(ctx context.Context, in SwitchActiveRoleInput) (*SwitchActiveRoleOutput, error) {
 	var out *SwitchActiveRoleOutput
 	err := uc.uow.WithinTransaction(ctx, func(ctx context.Context, tx ports.Transaction) error {
-		roles, err := tx.UserRoles().RolesForUser(ctx, in.UserID)
+		roleHeld, err := tx.UserRoles().HasRoleForUpdate(ctx, in.UserID, in.RequestedRole)
 		if err != nil {
-			return fmt.Errorf("load user roles: %w", err)
+			return fmt.Errorf("lock requested role assignment: %w", err)
 		}
-		if !slices.Contains(roles, in.RequestedRole) {
+		if !roleHeld {
 			return ports.ErrForbidden
 		}
-		session, accessToken, refreshToken, err := issueSessionWithTokens(ctx, tx, uc.secretGenerator, uc.clock, in.UserID, in.RequestedRole, uc.accessTokenTTL, uc.refreshTokenTTL)
-		if err != nil {
-			return err
+		session, err := tx.Sessions().GetForUpdate(ctx, in.CurrentSessionID)
+		if err != nil || session == nil {
+			return ports.ErrTokenInvalid
 		}
 		now := uc.clock.Now()
+		if session.UserID != in.UserID || session.RevokedAt != nil || !now.Before(session.ExpiresAt) {
+			return ports.ErrTokenInvalid
+		}
 		if err := tx.Sessions().Revoke(ctx, in.CurrentSessionID, now); err != nil {
 			return fmt.Errorf("revoke old session: %w", err)
 		}
-		meta := AuditMeta{ActorID: in.UserID, ActorRole: in.RequestedRole, Note: "role_switch"}
+		newSession, accessToken, refreshToken, err := issueSessionWithTokens(ctx, tx, uc.secretGenerator, uc.clock, in.UserID, in.RequestedRole, uc.accessTokenTTL, uc.refreshTokenTTL)
+		if err != nil {
+			return err
+		}
+		meta := AuditMeta{ActorID: session.UserID, ActorRole: session.ActiveRole, Note: "role_switch"}
+		if err := validateAuditMeta(meta); err != nil {
+			return err
+		}
 		oldEvent := newAuditEvent(meta, domain.EntityTypeSession, in.CurrentSessionID, string(domain.ActionSessionRevoke), "active", "revoked")
 		if err := tx.AuditEvents().RecordEvent(ctx, oldEvent); err != nil {
 			return fmt.Errorf("record old session audit event: %w", err)
 		}
-		newEvent := newAuditEvent(meta, domain.EntityTypeSession, session.ID, string(domain.ActionSessionCreate), "", "active")
+		newEvent := newAuditEvent(meta, domain.EntityTypeSession, newSession.ID, string(domain.ActionSessionCreate), "", "active")
 		if err := tx.AuditEvents().RecordEvent(ctx, newEvent); err != nil {
 			return fmt.Errorf("record new session audit event: %w", err)
 		}

@@ -39,6 +39,7 @@ type UserRepository interface {
 // UserRoleRepository provides access to roles currently assigned to a user.
 type UserRoleRepository interface {
 	RolesForUser(ctx context.Context, userID domain.UserID) ([]domain.ActorRole, error)
+	HasRoleForUpdate(ctx context.Context, userID domain.UserID, role domain.ActorRole) (bool, error)
 }
 
 // ResourceClassRepository provides persistence access for resource classes.

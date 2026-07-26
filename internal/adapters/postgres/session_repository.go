@@ -101,11 +101,15 @@ WHERE id = $1`+lockClause, id)
 }
 
 func (r *sessionRepository) Revoke(ctx context.Context, id string, at time.Time) error {
-	if _, err := r.q.Exec(ctx, `
+	ct, err := r.q.Exec(ctx, `
 UPDATE sessions
 SET revoked_at = $2
-WHERE id = $1`, id, at); err != nil {
+WHERE id = $1`, id, at)
+	if err != nil {
 		return mapWriteError("session_revoke", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("session_revoke: %w", ErrNotFound)
 	}
 
 	return nil

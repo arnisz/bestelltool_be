@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -117,9 +118,13 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 			if user == nil {
 				return nil
 			}
+			meta := AuditMeta{ActorID: user.ID, ActorRole: user.Role}
+			if err := validateAuditMeta(meta); err != nil {
+				return err
+			}
 
 			event := newAuditEvent(
-				AuditMeta{ActorID: user.ID, ActorRole: user.Role},
+				meta,
 				domain.EntityTypeAuthIdentity,
 				string(user.ID),
 				string(domain.ActionAuthLoginFailed),
@@ -162,6 +167,19 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 		// If user doesn't exist, return generic error now.
 		if user == nil {
 			if err := runDummyVerify(); err != nil {
+				return err
+			}
+			credentialsInvalid = true
+			return nil
+		}
+
+		roles, err := tx.UserRoles().RolesForUser(ctx, user.ID)
+		if err != nil {
+			return fmt.Errorf("load user roles: %w", err)
+		}
+		if !slices.Contains(roles, user.Role) {
+			_, _, _ = uc.passwordHasher.Verify(in.Password, authIdentity.PasswordHash)
+			if err := recordFailure(user); err != nil {
 				return err
 			}
 			credentialsInvalid = true
@@ -211,8 +229,12 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 			return err
 		}
 
+		meta := AuditMeta{ActorID: user.ID, ActorRole: user.Role}
+		if err := validateAuditMeta(meta); err != nil {
+			return err
+		}
 		event := newAuditEvent(
-			AuditMeta{ActorID: user.ID, ActorRole: user.Role},
+			meta,
 			domain.EntityTypeSession,
 			session.ID,
 			string(domain.ActionSessionCreate),
