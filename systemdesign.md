@@ -153,6 +153,45 @@ Technicians work offline-capable. This has consequences for authentication:
 * Refresh token lifetime must therefore exceed the realistic maximum offline
   period (default 30 days), while access token lifetime stays short.
 
+### 4.1 Authoritative Time
+
+The PostgreSQL server's clock is the single authoritative source of time
+for every timestamp used in cross-entity chronological reasoning — entity
+`created_at`/`updated_at`, audit `server_recorded_at`, and any value handed
+to a client as an opaque reconciliation cursor (Section 10.3). Neither an
+application server's local clock nor a client device's clock is trusted for
+this purpose — the same reasoning that already excludes client time from
+ordering/authorization (Section 4) extends here: with multiple backend
+instances sharing one PostgreSQL database (Section 7.3, D-1), per-instance
+system clocks can drift relative to each other, while the database has
+exactly one clock all instances agree on.
+
+This principle also governs any client-side system design (mobile client,
+web dashboard): those designs must treat their own device clock as advisory
+only (`client_occurred_at`-style — informational, never authoritative) and
+never as a value used to decide ordering, deduplication, or access.
+
+**Implementation note (not yet applied):** the production `Clock` adapter
+(Section 10) is currently backed by the application process's own
+`time.Now()`, not the database's clock. Single-snapshot consistency within
+one transaction is already correct — `UpdatedAt`, the audit event, and the
+published SSE `OccurredAt` all derive from one shared value per use case
+(verified). But that shared value itself currently originates from the app
+server's clock, not PostgreSQL's. To make the database authoritative in
+practice, the production `Clock` adapter should query PostgreSQL once per
+transaction (e.g. `SELECT clock_timestamp()`) and reuse that single value
+for everything written in that transaction, rather than reading the local
+process clock. Test `Clock` fakes remain unaffected — they inject a
+deterministic value directly, without touching the database.
+
+Existing DB-column defaults using `clock_timestamp()` (e.g.
+`users.created_at`, `audit_events.server_recorded_at`) are a separate,
+already-established use of the database clock for record-creation
+provenance. They are intentionally independent of the business timestamp
+used for reconciliation and do not need to match it — a row's creation
+instant and the business event's occurred-at instant serve different
+purposes.
+
 ---
 
 ## 5. Identity & User Management
@@ -705,6 +744,23 @@ know which new requests, allocations, or status changes occurred, because it
 has no advance knowledge of IDs it was never told about (e.g. a dispatcher
 assigned a new allocation to this technician while they were offline). Without
 a reconciliation endpoint, there is no way to discover them.
+
+**Timestamp consistency between SSE and reconciliation (SEC-consistency,
+no formal SEC number — a correctness requirement, not a security one):**
+
+Every SSE event already carries `OccurredAt` (`ports.Event.OccurredAt`). To
+let a client safely use this value as the next reconciliation `since`
+parameter without a watermark gap, `OccurredAt` MUST be set to the exact
+same value written as the affected entity's `updated_at` in the same
+transaction — not a separately computed timestamp. If any code path sets
+these from two different `clock.Now()` calls (even microseconds apart),
+a client using the earlier value as `since` can permanently miss the
+entity in the next reconciliation poll, because `updated_at` on record
+would be later than the client's watermark.
+
+Recommendation: derive both values from a single `now := clock.Now()`
+call per mutating transaction, and reuse that same `now` for the entity's
+`updated_at`, the audit event, and the published SSE event's `OccurredAt`.
 
 **Endpoint:**
 
