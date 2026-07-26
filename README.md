@@ -6,37 +6,40 @@ The project is intentionally domain-neutral. It can be used for tools, measuring
 
 ## Project Status
 
-The project is currently in an early development stage.
+The project is in an early (alpha) development stage. The domain layer, the PostgreSQL persistence adapters, and a first slice of the HTTP API are implemented and tested; identity/authorization, offline sync, and the client applications are not.
 
-Already implemented:
+### Implemented and tested
 
-- Go module and basic project structure
-- Hexagonal architecture
-- Pure domain layer
-- Entities for resources, requests, and allocations
-- State machines for `Resource`, `Request`, and `Allocation`
-- Version fields for optimistic concurrency control
-- Domain-specific errors
-- `AuditEvent` as a pure data structure
-- Unit tests for valid and invalid state transitions
+- Go module and hexagonal project structure
+- Pure domain layer: entities, state machines (including the direct-transfer path), version fields for optimistic concurrency, domain-specific errors, `AuditEvent` as a pure data structure
+- Application layer: ports (`UnitOfWork`, repositories, `AuditWriter`, `IdempotencyStore`, `EventPublisher`) and use cases — `CreateRequest`, `GetRequest`, `RequestReturn`, `TransferResource` are wired to HTTP; `MarkAllocationShippedBack`, `UpdateExecutionState`, and `ReactivateResource` are implemented and unit-tested but not yet exposed through an endpoint
+- PostgreSQL adapters: connection pool, Unit of Work, transactional repositories for requests/resources/allocations, `AuditWriter`, `IdempotencyStore`, and an embedded migration runner (`migrations/`, five migrations, optionally run at startup via `RUN_MIGRATIONS`)
+- HTTP API on Go's standard `net/http` `ServeMux`: `POST /api/v1/requests`, `GET /api/v1/requests/{id}`, `POST /api/v1/allocations/{id}/return-request`, `POST /api/v1/resources/{id}/transfer`, and `GET /api/v1/events`, plus the public `GET /healthz` liveness endpoint
+- Server-Sent Events: an in-memory broker (`internal/adapters/sse`) publishes typed events from the write use cases; `GET /api/v1/events` streams them with a dispatcher/technician role filter
+- Bearer-token authentication middleware and per-route role authorization (`requireRoles`)
+- Test suite: domain unit tests, use-case unit tests with in-memory fakes, PostgreSQL integration tests, HTTP handler tests, and an end-to-end test through the real HTTP → use case → repository → PostgreSQL stack
 
-Not yet implemented:
+### Implemented as a transitional solution
 
-- PostgreSQL integration
-- Unit of Work and repository adapters
-- HTTP API
-- Authentication
-- Offline synchronization
-- Idempotency store
-- Server-Sent Events
+- **Authentication currently uses `StaticTokenAuthenticator`** (`internal/adapters/auth`), configured via the `AUTH_STATIC_TOKENS` environment variable. This stands in for the session/token-based authentication described in `systemdesign.md` §7 and is accepted only when `APP_ENV=dev`; any other value is a fatal startup error. See the tech-debt list in `status.md` for the replacement plan.
+
+### Ports without a connected endpoint
+
+- `IdempotencyStore` has a port and a PostgreSQL adapter, but no use case calls it yet — idempotent outcome replay for offline sync is not enforced.
+- `ResourceClass` exists as a domain type with a database table, but has no repository port or adapter — resource classes cannot yet be created or queried through the application.
+
+### Not yet implemented
+
+- Session-based authentication (login/refresh/logout), Argon2id password hashing, the roles-and-permissions model, and admin user-management endpoints (see `systemdesign.md` §5–§8 and §10.1)
+- Offline synchronization with idempotent outcome replay
 - Web dashboard
 - Technician client
 
-The current version therefore does not yet provide a production-ready server.
-
 ## Deployment Strategy
 
-For verbindliche Regeln zu automatischen Datenbankmigrationen beim Serverstart (`RUN_MIGRATIONS`) siehe `docs/deployment.md`.
+For binding rules on automatic database migrations at server startup (`RUN_MIGRATIONS`), see `docs/deployment.md`.
+
+In production the backend must not be exposed directly: it binds to an internal interface only, behind a TLS-terminating reverse proxy (SEC-27, see `docs/deployment.md`). The local Docker Compose setup in this repository does not include such a proxy — it publishes the backend directly on `127.0.0.1:8080` for development convenience only.
 
 ## Core Features
 
@@ -46,12 +49,13 @@ The planned system includes:
 - Resource requests created by technicians
 - Allocation of concrete resources by dispatch
 - Individual planning periods for each resource allocation
+- Direct site-to-site transfer of resources without a warehouse return, restricted to the dispatcher
 - Explicit return and recall workflows
 - Inspection of returned resources
 - Blocking defective or unavailable resources
 - Complete audit trail for status changes
 - Offline-capable technician clients
-- Conflict resolution based on the “dispatcher wins” policy
+- Conflict resolution based on the "dispatcher wins" policy
 - Idempotent synchronization with outcome replay
 - Live updates for the dispatch dashboard using SSE
 
@@ -69,7 +73,11 @@ internal/
   adapters/
     postgres/
     http/
+    auth/
+    sse/
 migrations/
+docs/
+scripts/
 ```
 
 ### Domain Layer
@@ -93,25 +101,24 @@ The domain layer has no dependencies on:
 
 ### Application Layer
 
-The application layer will contain use cases and ports. State-changing operations will be executed through a Unit of Work so that the state change and its corresponding audit event are stored in the same database transaction.
+`internal/application/ports` defines the interfaces (`UnitOfWork`, `RequestRepository`, `ResourceRepository`, `AllocationRepository`, `AuditWriter`, `IdempotencyStore`, `EventPublisher`, `Authenticator`). `internal/application/usecases` implements the orchestration logic against those ports only. State-changing use cases run through the `UnitOfWork` so that the state change and its `AuditEvent` are written in the same database transaction.
 
 ### Adapters
 
-Planned adapters include:
+Implemented adapters:
 
-- PostgreSQL using `pgx/v5`
-- REST API using Go's standard `net/http` package
-- Server-Sent Events
-- Optional future database or integration adapters
+- `postgres`: connection pool, Unit of Work, and transactional repositories using `pgx/v5`
+- `http` (package `httpadapter`): REST handlers and the SSE stream endpoint on Go's standard `net/http`
+- `auth`: `StaticTokenAuthenticator`, a transitional bearer-token authenticator (see Project Status)
+- `sse`: in-memory event broker
 
 ## Technology Stack
 
-- Go 1.22 or newer
+- Go 1.26 or newer (see `go.mod`)
 - Go standard library
 - PostgreSQL
 - `github.com/jackc/pgx/v5`
 - Docker and Docker Compose
-- Caddy as reverse proxy
 - Apache License 2.0
 
 Not allowed:
@@ -127,10 +134,9 @@ Not allowed:
 
 ## Requirements
 
-For the current development stage, the following tools are required:
-
-- Go 1.22 or newer
+- Go 1.26 or newer
 - Git
+- Docker Desktop with Docker Compose (to run PostgreSQL and the server; not required to build or run unit tests)
 - PowerShell, Bash, or another terminal
 - GoLand is optional
 
@@ -139,6 +145,7 @@ Check the installed versions:
 ```powershell
 go version
 git --version
+docker compose version
 ```
 
 ## Installation
@@ -152,11 +159,7 @@ git clone <REPOSITORY-URL>
 cd bestelltool_be
 ```
 
-For an existing local project, change directly to the project directory:
-
-```powershell
-cd C:\Users\arnol\source\repos\bestelltool_be
-```
+For an existing local project, change directly to the project directory.
 
 ### 2. Verify the Go Module
 
@@ -174,13 +177,59 @@ C:\Users\arnol\source\repos\bestelltool_be\go.mod
 
 ### 3. Resolve Dependencies
 
-The current domain layer only uses the Go standard library. The following command may still be used to clean and verify module dependencies:
+The project depends on `github.com/jackc/pgx/v5` (PostgreSQL driver) and its transitive dependencies, pinned in `go.sum`. Download them into the local module cache:
 
 ```powershell
-go mod tidy
+go mod download
 ```
 
-### 4. Verify the Project
+### 4. Configure the Environment
+
+Copy the example environment file and adjust it for local use:
+
+```powershell
+copy .env.example .env
+```
+
+`docker compose` reads `.env` automatically. At minimum it must set `AUTH_STATIC_TOKENS` (dev-only bearer tokens, format `token:user-id:role,...`) — see `agents.md` for the full environment variable reference and `status.md` for the current tech debt around this variable.
+
+## Running the Project
+
+The server requires `APP_ENV`, `DATABASE_URL`, and `AUTH_STATIC_TOKENS` at startup (`cmd/server/config.go`); it fails fast if any is missing or invalid. The quickest way to run it locally is via Docker Compose, which supplies all three.
+
+### Start the development database
+
+```powershell
+docker compose up -d --wait db
+```
+
+(Equivalent to running `persistent.bat`.) This starts a persistent PostgreSQL instance on `127.0.0.1:5432`.
+
+### Build and start the backend
+
+```powershell
+docker compose up -d --build backend
+```
+
+This builds the multi-stage `Dockerfile` (distroless, non-root user `65532:65532`), starts the container with `RUN_MIGRATIONS=true`, and applies the embedded migrations from `migrations/` on startup. The server listens on `127.0.0.1:8080`.
+
+### Verify it is running
+
+```powershell
+curl http://127.0.0.1:8080/healthz
+```
+
+A successful response is `{"status":"ok"}` with HTTP status `200`. `GET /healthz` is intentionally unauthenticated and returns no business, database, version, or build information (see `agents.md`).
+
+### Seed data (optional)
+
+`scripts/dev-seed.sql` inserts two example users (`dev-dispatcher`, `dev-technician`) so that requests referencing them do not fail on a foreign key. It is not applied automatically; run it against the `db` container's `resource` database if you need those rows for manual API testing.
+
+### Stop / reset
+
+`docker compose down` stops the containers and keeps the `resource_pgdata` volume. `resetdb.bat` deletes that volume for a clean slate.
+
+## Verify the Project
 
 Format the source code:
 
@@ -213,37 +262,29 @@ PASS
 ok      bestelltool_be/internal/domain
 ```
 
-Messages such as the following are not errors:
+`?       bestelltool_be/internal/application/ports  [no test files]` and the same line for `bestelltool_be/migrations` are not errors — those packages currently contain no test files.
 
-```text
-?       bestelltool_be             [no test files]
-?       bestelltool_be/cmd/server  [no test files]
-```
+### Integration Tests
 
-They only indicate that these packages currently contain no test files.
-
-## Running the Project
-
-The current `cmd/server` package contains only a minimal compilable placeholder. A functional HTTP server has not yet been implemented.
-
-Compilation can be verified with:
+PostgreSQL integration tests in `internal/adapters/postgres/` (and the end-to-end test in `internal/adapters/http/`) are skipped automatically when `TEST_DATABASE_URL` is not set — running `go test ./...` without it still reports `ok`, just without exercising those cases. To run them for real:
 
 ```powershell
-go build ./...
+docker compose --profile test up -d --force-recreate --wait db-test
 ```
 
-Once the server adapter has been implemented, the application is expected to be started with:
+(Equivalent to running `emptydb.bat`.) This starts an ephemeral, tmpfs-backed PostgreSQL instance on `127.0.0.1:5433` for a reproducible, empty test database.
 
 ```powershell
-go run ./cmd/server
+$env:TEST_DATABASE_URL = "postgres://dev:dev@127.0.0.1:5433/resource_test?sslmode=disable"
+go test -count=1 -p 1 ./...
 ```
 
-At the current development stage, this command does not yet expose a production API.
+Use `-p 1` here because the postgres and http packages otherwise access the same test database in parallel.
 
 ## Development with GoLand
 
 1. Open the project directory in GoLand.
-2. Ensure that a Go SDK version 1.22 or newer is configured.
+2. Ensure that a Go SDK version 1.26 or newer is configured.
 3. Open the integrated terminal with `Alt+F12`.
 4. Run the following commands from the project root:
 
@@ -273,9 +314,12 @@ allocated
   → shipped_back
   → inspection
   → completed
+
+allocated → cancelled
+with_technician → completed   (direct transfer, see below)
 ```
 
-A return is always an explicit action. Reaching the planned end date never causes an automatic state transition.
+A return is always an explicit action. Reaching the planned end date never causes an automatic state transition. A direct transfer completes the allocation straight from `with_technician`, bypassing `return_requested` / `shipped_back` / `inspection`; a pending return request does not block it.
 
 ### Resource
 
@@ -286,6 +330,9 @@ available
   → in_use
   → shipped_back
   → inspection
+
+available → externally_procured
+in_use → reserved   (direct transfer to a new holder)
 ```
 
 After inspection:
@@ -295,7 +342,7 @@ inspection → available
 inspection → blocked
 ```
 
-A blocked resource can only be reactivated through an explicit action.
+A blocked resource can only be reactivated through an explicit action. A direct transfer (`in_use → reserved` for the new holder) is only permitted while the resource has no active block; per `systemdesign.md` §3 it is restricted to the dispatcher.
 
 ### Request
 
@@ -308,34 +355,24 @@ open
   → completed
 ```
 
-A request may also be cancelled while it is still in one of the permitted early states.
+A request may also be cancelled while it is still `open` or `in_progress`.
 
 ## Tests
 
 The test suite covers, among other things:
 
-- Valid construction
-- Missing required fields
-- Allowed state transitions
-- Forbidden state transitions
-- Unchanged state after failed operations
-- Unchanged version after failed operations
-- Version increments after successful operations
-- Invalid time ranges
-- Required reasons and notes
-- Explicit reactivation of blocked resources
-- No automatic state changes based on dates
+- Valid construction and missing required fields
+- Allowed and forbidden state transitions, including direct transfer
+- Unchanged state and version after failed operations; version increments after successful ones
+- Invalid time ranges, required reasons and notes
+- Explicit reactivation of blocked resources; no automatic state changes based on dates
+- Use cases against in-memory fakes and against a real PostgreSQL database (row locking, optimistic-locking conflicts, the single-active-allocation constraint)
+- HTTP handlers, including authentication/authorization negative cases and JSON error mapping
+- One end-to-end request-to-return-to-transfer lifecycle through the real HTTP → PostgreSQL stack
 
 ## Next Development Steps
 
-1. Define application ports
-2. Define the Unit of Work contract
-3. Define repository contracts
-4. Define `AuditWriter` and `IdempotencyStore`
-5. Implement the first transactional use cases
-6. Design the PostgreSQL schema and migrations
-7. Implement PostgreSQL adapters using `pgx/v5`
-8. Add the HTTP API and SSE support
+The roadmap is tracked in `status.md` ("Next Steps") and the migration phases in `systemdesign.md` §13, not duplicated here.
 
 ## Project Rules
 
@@ -349,6 +386,6 @@ After completing significant work, update `status.md`.
 
 ## License
 
-This project is intended to be released under the Apache License 2.0.
+This project is released under the Apache License 2.0 — see `LICENSE`.
 
 GPL or AGPL dependencies must not be introduced.

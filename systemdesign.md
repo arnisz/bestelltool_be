@@ -84,6 +84,55 @@ deployment site to the next (direct transfer).
   constraint: a resource in transit back cannot be allocated to a new request.
   Direct transfer is only possible *before* a return shipment is initiated.
 
+### External Procurement
+
+*This subsection is derived directly from `internal/domain/resource.go` and its
+test coverage; it documents what the code currently does, not a designed
+business process. Open questions are listed in Section 12.*
+
+* `Resource.MarkExternallyProcured()` transitions a resource from `available`
+  to `externally_procured`. No other precondition is checked (no block-reason
+  guard, no holder requirement) and no reason or note is recorded — the method
+  takes no parameters beyond the receiver.
+* No code path transitions a resource **out of** `externally_procured` again;
+  as implemented today it is a terminal state in the domain model.
+* The transition is not yet reachable through any use case or HTTP endpoint —
+  no caller exists outside of the domain package itself — and it is the only
+  resource state transition with **no unit test**. `externally_procured` is
+  already a valid value in the `chk_resources_status_valid` constraint
+  (migration `000001`), so the column can hold it, but nothing sets it there
+  today.
+
+### Allocation Cancellation
+
+*This subsection is derived directly from `internal/domain/allocation.go` and
+its test coverage; it documents what the code currently does, not a designed
+business process. Open questions are listed in Section 12.*
+
+* `Allocation.Cancel()` only succeeds from `allocated`, i.e. strictly before
+  `MarkShipped`. From `completed` it returns `ErrAlreadyCompleted`; from any
+  other status (`shipped`, `with_technician`, `return_requested`,
+  `shipped_back`, `inspection`, already `cancelled`) it returns
+  `ErrInvalidTransition`.
+* No reason or note is required or recorded — unlike blocking a resource
+  (`CompleteInspectionBlocked`, which mandates a `BlockReason`), `Cancel` takes
+  only a timestamp.
+* `Request` has a separate, structurally identical `Cancel()` method
+  (`open`/`in_progress` → `cancelled`). The two `Cancel` methods are
+  independent in code; nothing links cancelling a request to cancelling its
+  allocations, or vice versa.
+* Neither `Allocation.Cancel()` nor `Request.Cancel()` is called by any use
+  case in `internal/application/usecases`, and neither has an HTTP route. No
+  permission constant exists for either (compare the catalogue in Section 6.2).
+* `Resource.Reserve()` (the transition that would put a resource into
+  `reserved` for an allocation) is likewise not called by any production use
+  case today — only `TransferResourceUseCase` creates a new allocation, and
+  only for a resource that is already `in_use`. There is currently no
+  observable end-to-end path where an `allocated`-status allocation exists
+  together with a `reserved`-status resource, so the interaction between
+  cancelling such an allocation and freeing its resource cannot be verified
+  against running code.
+
 ---
 
 ## 4. Offline Operation (Technicians)
@@ -665,6 +714,8 @@ writes are audited through one path.
 | **D-3** | Technicians hold `request.read` for *all* requests (current behaviour, deliberate and fully audited). Scoping to `request.read.own` is the recommended hardening once mobile clients are in the field. | open |
 | **D-4** | Whether reference master data maintenance moves from direct DB access to the API before beta | open |
 | **D-5** | Whether Entra ID / OIDC is available in the target network at all | open, decides Section 7.1 vs 7.2 |
+| **D-6** | External procurement (Section 3, "External Procurement"): what does `externally_procured` mean operationally (write-off vs. temporary substitute), who may trigger it, is a reason mandatory as for blocking, can a resource ever leave this state, and must it be disallowed while an active allocation exists? None of this is decidable from the current code, which has no caller and no test for the transition. | open |
+| **D-7** | Allocation cancellation (Section 3, "Allocation Cancellation"): what triggers `Allocation.Cancel()` in practice — a dispatcher decision, a cascading `Request.Cancel()`, both? Is a reason mandatory? Who may cancel? Does cancelling free the resource (no such resource-side transition exists today)? Undecided pending the use case and endpoint that would call it. | open |
 
 ---
 

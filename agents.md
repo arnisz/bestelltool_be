@@ -112,7 +112,7 @@ Reversing step 1 and 3 causes PostgreSQL error `23505` on `uq_allocations_single
 
 ## 5. Offline-Sync & Idempotency Rules
 *   **Outcome-Replay**: The technician client operates offline and sends batches of actions (`client_action_id`, `client_seq`).
-*   Before processing any action, you MUST check the `IdempotencyStore`.
+*   Before processing any action, you MUST check the `IdempotencyStore`. (This rule takes effect once the sync-batch endpoint exists. As of now no use case calls `IdempotencyStore` — see Tech Debt in `status.md`.)
 *   If an action was already processed, return the stored result (Outcome-Replay). Do NOT evaluate the business logic again.
 *   **Batch Semantics**: A sync batch can partially fail. If one action fails, dependent actions are marked as `skipped`, independent actions continue. Never blindly reject the entire batch.
 *   **Authentication endpoints are excluded from the idempotency mechanism.** `login`, `refresh`, `logout` and `switch-role` must never be served from the `IdempotencyStore`: replaying a stored outcome would hand out the same token twice and defeat single-use refresh semantics. Refresh retries are handled exclusively by `REFRESH_REPLAY_GRACE` / `successor_token_id` (see Section 7).
