@@ -227,6 +227,7 @@ func (c *fakeClock) Now() time.Time {
 
 type fakeTransaction struct {
 	users         *fakeUserRepository
+	userRoles     *fakeUserRoleRepository
 	authIds       *fakeAuthIdentityRepository
 	sessions      *fakeSessionRepository
 	refreshTokens *fakeRefreshTokenRepository
@@ -235,6 +236,13 @@ type fakeTransaction struct {
 
 func (tx *fakeTransaction) Users() ports.UserRepository {
 	return tx.users
+}
+
+func (tx *fakeTransaction) UserRoles() ports.UserRoleRepository {
+	if tx.userRoles == nil {
+		return &fakeUserRoleRepository{roles: []domain.ActorRole{domain.ActorRoleTechnician}}
+	}
+	return tx.userRoles
 }
 
 func (tx *fakeTransaction) AuthIdentities() ports.AuthIdentityRepository {
@@ -278,6 +286,15 @@ func (tx *fakeTransaction) AuditEvents() ports.AuditRepository {
 
 func (tx *fakeTransaction) Idempotency() ports.IdempotencyStore {
 	panic("not implemented in test")
+}
+
+type fakeUserRoleRepository struct {
+	roles []domain.ActorRole
+	err   error
+}
+
+func (r *fakeUserRoleRepository) RolesForUser(context.Context, domain.UserID) ([]domain.ActorRole, error) {
+	return r.roles, r.err
 }
 
 type fakeUnitOfWork struct {

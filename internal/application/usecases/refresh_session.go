@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -54,8 +55,9 @@ func (uc *RefreshSessionUseCase) Execute(ctx context.Context, in RefreshSessionI
 	}
 	hash := sha256.Sum256([]byte(secret))
 	var (
-		out    *RefreshSessionOutput
-		replay bool
+		out         *RefreshSessionOutput
+		replay      bool
+		roleRevoked bool
 	)
 	err = uc.uow.WithinTransaction(ctx, func(ctx context.Context, tx ports.Transaction) error {
 		presented, err := tx.RefreshTokens().GetForUpdate(ctx, id)
@@ -66,10 +68,32 @@ func (uc *RefreshSessionUseCase) Execute(ctx context.Context, in RefreshSessionI
 		if err != nil || session == nil || session.RevokedAt != nil {
 			return ports.ErrTokenInvalid
 		}
-		if !uc.clock.Now().Before(session.ExpiresAt) {
+		now := uc.clock.Now()
+		if !now.Before(session.ExpiresAt) {
 			return ports.ErrTokenExpired
 		}
-		now := uc.clock.Now()
+		roles, err := tx.UserRoles().RolesForUser(ctx, session.UserID)
+		if err != nil {
+			return fmt.Errorf("load active role assignments: %w", err)
+		}
+		if !slices.Contains(roles, session.ActiveRole) {
+			if err := tx.Sessions().Revoke(ctx, session.ID, now); err != nil {
+				return fmt.Errorf("revoke session with unheld active role: %w", err)
+			}
+			event := newAuditEvent(
+				AuditMeta{ActorID: session.UserID, ActorRole: session.ActiveRole, Note: "active_role_no_longer_held"},
+				domain.EntityTypeSession,
+				session.ID,
+				string(domain.ActionSessionRevoke),
+				"active",
+				"revoked",
+			)
+			if err := tx.AuditEvents().RecordEvent(ctx, event); err != nil {
+				return fmt.Errorf("record active role revocation audit event: %w", err)
+			}
+			roleRevoked = true
+			return nil
+		}
 		if presented.SuccessorTokenID != nil {
 			successor, err := tx.RefreshTokens().GetByID(ctx, *presented.SuccessorTokenID)
 			if err != nil {
@@ -113,6 +137,7 @@ func (uc *RefreshSessionUseCase) Execute(ctx context.Context, in RefreshSessionI
 		if err != nil {
 			return fmt.Errorf("generate refresh token secret: %w", err)
 		}
+		refreshSecret = generatedTokenSecret(refreshSecret)
 		refreshID, err := generateTokenID()
 		if err != nil {
 			return fmt.Errorf("generate refresh token id: %w", err)
@@ -149,6 +174,9 @@ func (uc *RefreshSessionUseCase) Execute(ctx context.Context, in RefreshSessionI
 	if replay {
 		return nil, ports.ErrTokenInvalid
 	}
+	if roleRevoked {
+		return nil, ports.ErrTokenInvalid
+	}
 	return out, nil
 }
 
@@ -157,6 +185,7 @@ func (uc *RefreshSessionUseCase) issueAccessToken() (string, []byte, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("generate access token secret: %w", err)
 	}
+	secret = generatedTokenSecret(secret)
 	id, err := generateTokenID()
 	if err != nil {
 		return "", nil, fmt.Errorf("generate access token id: %w", err)

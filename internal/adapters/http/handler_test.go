@@ -27,13 +27,40 @@ func (f *fakeAuthenticator) Authenticate(_ context.Context, _ string) (*ports.Pr
 	return f.principal, f.err
 }
 
-// newFakeAuth returns an authenticator that always succeeds with the given identity.
+// newFakeAuth returns an authenticator that succeeds with the given identity and
+// the permissions assigned to its active role in the migration seed.
 func newFakeAuth(userID, role string) *fakeAuthenticator {
+	permissions := make(map[string]struct{})
+	for _, permission := range permissionsForRole(domain.ActorRole(role)) {
+		permissions[permission] = struct{}{}
+	}
 	return &fakeAuthenticator{
 		principal: &ports.Principal{
-			UserID: domain.UserID(userID),
-			Role:   domain.ActorRole(role),
+			UserID:      domain.UserID(userID),
+			Role:        domain.ActorRole(role),
+			Permissions: permissions,
 		},
+	}
+}
+
+func permissionsForRole(role domain.ActorRole) []string {
+	switch role {
+	case domain.ActorRoleTechnician:
+		return []string{
+			domain.PermissionRequestCreate,
+			domain.PermissionRequestRead,
+			domain.PermissionAllocationReturnRequest,
+			domain.PermissionEventStreamOwn,
+		}
+	case domain.ActorRoleDispatcher:
+		return []string{
+			domain.PermissionRequestRead,
+			domain.PermissionAllocationReturnRequest,
+			domain.PermissionResourceTransferDirect,
+			domain.PermissionEventStreamAll,
+		}
+	default:
+		return nil
 	}
 }
 
@@ -195,7 +222,7 @@ func TestAuthMiddlewareValidTokenPropagatesPrincipal(t *testing.T) {
 	)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests",
-		strings.NewReader(`{"request_id":"req-1","technician_id":"tech-1","requested_resource_classes":["rc-1"],"audit":{}}`))
+		strings.NewReader(`{"request_id":"req-1","requested_resource_classes":["rc-1"],"audit":{}}`))
 	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -205,6 +232,9 @@ func TestAuthMiddlewareValidTokenPropagatesPrincipal(t *testing.T) {
 	}
 	if createUC.in.Audit.ActorRole != wantRole {
 		t.Fatalf("audit actor role = %q, want %q", createUC.in.Audit.ActorRole, wantRole)
+	}
+	if createUC.in.TechnicianID != wantUserID {
+		t.Fatalf("technician id = %q, want %q", createUC.in.TechnicianID, wantUserID)
 	}
 }
 
@@ -246,11 +276,11 @@ func TestBodyWithActorFieldsReturns400(t *testing.T) {
 	}{
 		{
 			name: "actor_id in audit",
-			body: `{"request_id":"req-1","technician_id":"tech-1","requested_resource_classes":["rc-1"],"audit":{"actor_id":"attacker"}}`,
+			body: `{"request_id":"req-1","requested_resource_classes":["rc-1"],"audit":{"actor_id":"attacker"}}`,
 		},
 		{
 			name: "actor_role in audit",
-			body: `{"request_id":"req-1","technician_id":"tech-1","requested_resource_classes":["rc-1"],"audit":{"actor_role":"dispatcher"}}`,
+			body: `{"request_id":"req-1","requested_resource_classes":["rc-1"],"audit":{"actor_role":"dispatcher"}}`,
 		},
 	}
 
@@ -276,6 +306,31 @@ func TestBodyWithActorFieldsReturns400(t *testing.T) {
 	}
 }
 
+func TestCreateRequestRejectsTechnicianIDFromBody_SEC01(t *testing.T) {
+	createUC := &fakeCreateRequestUseCase{}
+	h := NewHandlerWithClock(
+		newFakeAuth("tech-authenticated", "technician"),
+		createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{}, time.Now,
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests",
+		strings.NewReader(`{"request_id":"req-1","technician_id":"tech-foreign","requested_resource_classes":["rc-1"],"audit":{}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	errRes := decodeErrorResponse(t, rec)
+	if errRes.Error.Code != "bad_request" {
+		t.Fatalf("error.code = %q, want bad_request", errRes.Error.Code)
+	}
+	if createUC.in.RequestID != "" {
+		t.Fatalf("use case should not be called, got request id = %q", createUC.in.RequestID)
+	}
+}
+
 // ── Missing Principal (Programming Error) ─────────────────────────────────────
 
 // TestHandlerMissingPrincipalReturns500 calls the handler method DIRECTLY without
@@ -288,7 +343,7 @@ func TestHandlerMissingPrincipalReturns500(t *testing.T) {
 		now:           time.Now,
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests",
-		strings.NewReader(`{"request_id":"req-1","technician_id":"tech-1","requested_resource_classes":["rc-1"],"audit":{}}`))
+		strings.NewReader(`{"request_id":"req-1","requested_resource_classes":["rc-1"],"audit":{}}`))
 	rec := httptest.NewRecorder()
 	h.handleCreateRequest(rec, req)
 
@@ -342,7 +397,7 @@ func TestCreateRequestErrorMapping(t *testing.T) {
 			})
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/requests",
-				strings.NewReader(`{"request_id":"req-1","technician_id":"tech-1","requested_resource_classes":["rc-1"],"audit":{}}`))
+				strings.NewReader(`{"request_id":"req-1","requested_resource_classes":["rc-1"],"audit":{}}`))
 			req.Header.Set("Authorization", "Bearer test-token")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -370,13 +425,13 @@ func TestCreateRequestSuccessAuditFromPrincipalAndDefaultCreatedAt(t *testing.T)
 
 	createUC := &fakeCreateRequestUseCase{out: created}
 	h := NewHandlerWithClock(
-		newFakeAuth("technician-token-user", "technician"),
+		newFakeAuth("tech-1", "technician"),
 		createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{},
 		func() time.Time { return fixedNow },
 	)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests",
-		strings.NewReader(`{"request_id":"req-1","technician_id":"tech-1","context_ref":"ctx","context_label":"ctx-label","requested_resource_classes":["rc-1"],"audit":{}}`))
+		strings.NewReader(`{"request_id":"req-1","context_ref":"ctx","context_label":"ctx-label","requested_resource_classes":["rc-1"],"audit":{}}`))
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("X-Client-Occurred-At", "2026-07-19T08:15:00Z")
 	rec := httptest.NewRecorder()
@@ -386,14 +441,24 @@ func TestCreateRequestSuccessAuditFromPrincipalAndDefaultCreatedAt(t *testing.T)
 		t.Fatalf("status = %d, want 201", rec.Code)
 	}
 	// Actor identity comes from the Principal (Bearer token), NOT body or any header.
-	if createUC.in.Audit.ActorID != "technician-token-user" {
-		t.Fatalf("audit actor id = %q, want technician-token-user", createUC.in.Audit.ActorID)
+	if createUC.in.Audit.ActorID != "tech-1" {
+		t.Fatalf("audit actor id = %q, want tech-1", createUC.in.Audit.ActorID)
 	}
 	if createUC.in.Audit.ActorRole != domain.ActorRoleTechnician {
 		t.Fatalf("audit actor role = %q, want technician", createUC.in.Audit.ActorRole)
 	}
 	if createUC.in.CreatedAt != fixedNow {
 		t.Fatalf("created at = %v, want %v", createUC.in.CreatedAt, fixedNow)
+	}
+	if createUC.in.TechnicianID != "tech-1" {
+		t.Fatalf("input technician id = %q, want tech-1", createUC.in.TechnicianID)
+	}
+	var response requestResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.TechnicianID != "tech-1" {
+		t.Fatalf("response technician id = %q, want tech-1", response.TechnicianID)
 	}
 	// X-Client-Occurred-At (informational client timestamp) is still accepted.
 	if createUC.in.Audit.ClientOccurredAt == nil {
@@ -935,11 +1000,116 @@ func TestRequireRolesMissingPrincipal(t *testing.T) {
 	}
 }
 
+// ── Permission Middleware and Route Authorization Tests ───────────────────────
+
+func TestRequirePermissionsRequiresAllPermissions_SEC13(t *testing.T) {
+	called := false
+	inner := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	})
+	mw := requirePermissions(domain.PermissionRequestCreate, domain.PermissionRequestRead)(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := context.WithValue(req.Context(), contextKey, &ports.Principal{Permissions: map[string]struct{}{
+		domain.PermissionRequestCreate: {},
+		domain.PermissionRequestRead:   {},
+	}})
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req.WithContext(ctx))
+
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d, called = %v; want 200 and called", rec.Code, called)
+	}
+}
+
+func TestRequirePermissionsMissingPermissionForbidden_SEC13(t *testing.T) {
+	called := false
+	inner := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	mw := requirePermissions(domain.PermissionRequestCreate, domain.PermissionRequestRead)(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := context.WithValue(req.Context(), contextKey, &ports.Principal{Permissions: map[string]struct{}{
+		domain.PermissionRequestCreate: {},
+	}})
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req.WithContext(ctx))
+
+	if rec.Code != http.StatusForbidden || called {
+		t.Fatalf("status = %d, called = %v; want 403 and not called", rec.Code, called)
+	}
+}
+
+func TestRequireAnyPermissionAllowsOnePermission_SEC13(t *testing.T) {
+	called := false
+	inner := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	mw := requireAnyPermission(domain.PermissionEventStreamOwn, domain.PermissionEventStreamAll)(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := context.WithValue(req.Context(), contextKey, &ports.Principal{Permissions: map[string]struct{}{
+		domain.PermissionEventStreamAll: {},
+	}})
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req.WithContext(ctx))
+
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d, called = %v; want 200 and called", rec.Code, called)
+	}
+}
+
+func TestRequireAnyPermissionWithoutPermissionForbidden_SEC13(t *testing.T) {
+	called := false
+	inner := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	mw := requireAnyPermission(domain.PermissionEventStreamOwn, domain.PermissionEventStreamAll)(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := context.WithValue(req.Context(), contextKey, &ports.Principal{Permissions: map[string]struct{}{}})
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req.WithContext(ctx))
+
+	if rec.Code != http.StatusForbidden || called {
+		t.Fatalf("status = %d, called = %v; want 403 and not called", rec.Code, called)
+	}
+}
+
+func TestRequireAuthenticatedMissingPrincipalReturnsInternalError_SEC01(t *testing.T) {
+	called := false
+	inner := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	rec := httptest.NewRecorder()
+	requireAuthenticated()(inner).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusInternalServerError || called {
+		t.Fatalf("status = %d, called = %v; want 500 and not called", rec.Code, called)
+	}
+}
+
+func TestAllProtectedRoutesDeclarePermissionsOrAreSelfService_SEC13(t *testing.T) {
+	routes := &routeRegistry{}
+	registerProtectedRoutes(http.NewServeMux(), routes, &handler{})
+
+	if len(routes.routes) != 9 {
+		t.Fatalf("registered protected routes = %d, want 9", len(routes.routes))
+	}
+	for _, route := range routes.routes {
+		switch route.Kind {
+		case routeAuthorizationPermission, routeAuthorizationAnyPermission:
+			if len(route.Permissions) == 0 {
+				t.Errorf("%s %s has no permission declaration", route.Method, route.Pattern)
+			}
+		case routeAuthorizationSelfService:
+			if len(route.Permissions) != 0 {
+				t.Errorf("%s %s self-service route declares permissions", route.Method, route.Pattern)
+			}
+		default:
+			t.Errorf("%s %s has undeclared authorization kind %q", route.Method, route.Pattern, route.Kind)
+		}
+	}
+}
+
 // ── Per-Endpoint Authorization Matrix Tests ───────────────────────────────────
 
 // TestCreateRequest_AuthorizationMatrix covers the POST /api/v1/requests endpoint.
 func TestCreateRequest_AuthorizationMatrix(t *testing.T) {
-	body := `{"request_id":"req-auth","technician_id":"tech-1","requested_resource_classes":["rc-1"],"audit":{}}`
+	body := `{"request_id":"req-auth","requested_resource_classes":["rc-1"],"audit":{}}`
 
 	tests := []struct {
 		name       string
@@ -957,7 +1127,7 @@ func TestCreateRequest_AuthorizationMatrix(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			createUC := &fakeCreateRequestUseCase{}
 			h := NewHandlerWithClock(
-				newFakeAuth("user-1", tt.role),
+				newFakeAuth("tech-1", tt.role),
 				createUC, &fakeGetRequestUseCase{}, &fakeRequestReturnUseCase{}, &fakeTransferResourceUseCase{},
 				time.Now,
 			)
@@ -998,7 +1168,7 @@ func TestGetRequest_AuthorizationMatrix(t *testing.T) {
 	}{
 		{name: "technician allowed", role: "technician", wantStatus: http.StatusOK, wantCalled: true},
 		{name: "dispatcher allowed", role: "dispatcher", wantStatus: http.StatusOK, wantCalled: true},
-		{name: "admin allowed", role: "admin", wantStatus: http.StatusOK, wantCalled: true},
+		{name: "admin forbidden without request read SEC-15", role: "admin", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
 	}
 
 	for _, tt := range tests {
@@ -1047,7 +1217,7 @@ func TestRequestReturn_AuthorizationMatrix(t *testing.T) {
 		wantCalled bool
 	}{
 		{name: "technician allowed", role: "technician", wantStatus: http.StatusNoContent, wantCalled: true},
-		{name: "dispatcher forbidden", role: "dispatcher", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
+		{name: "dispatcher allowed", role: "dispatcher", wantStatus: http.StatusNoContent, wantCalled: true},
 		{name: "admin forbidden", role: "admin", wantStatus: http.StatusForbidden, wantCode: "forbidden", wantCalled: false},
 	}
 

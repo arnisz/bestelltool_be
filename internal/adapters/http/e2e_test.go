@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,6 @@ func TestResourceLifecycleE2E(t *testing.T) {
 	// Schritt A: Techniker A legt einen Request an.
 	createBody := map[string]any{
 		"request_id":                 requestAID,
-		"technician_id":              "tech-a",
 		"context_ref":                "ctx-e2e-a",
 		"context_label":              "E2E A",
 		"note":                       "created in e2e",
@@ -162,6 +162,196 @@ func TestResourceLifecycleE2E(t *testing.T) {
 	decodeJSONResponse(t, resp, &forbidden)
 	if forbidden.Error.Code != "forbidden" {
 		t.Fatalf("forbidden error code = %q, want %q", forbidden.Error.Code, "forbidden")
+	}
+}
+
+type e2eClock struct {
+	now time.Time
+}
+
+func (c *e2eClock) Now() time.Time {
+	return c.now
+}
+
+func TestSwitchActiveRoleAndGetMeE2E(t *testing.T) {
+	pool := e2eTestPool(t)
+	now := time.Date(2026, time.July, 26, 17, 0, 0, 0, time.UTC)
+	clock := &e2eClock{now: now}
+	uow := postgres.NewUnitOfWork(pool)
+
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO users(id, username, role, display_name, is_active)
+VALUES ('multi-user', 'multi-user', 'technician', 'Multi Role User', true);
+INSERT INTO user_roles(user_id, role_code, assigned_by) VALUES
+('multi-user', 'technician', 'system-bootstrap'),
+('multi-user', 'dispatcher', 'system-bootstrap');`); err != nil {
+		t.Fatalf("seed multi-role user error = %v", err)
+	}
+
+	passwordHasher := authadapter.NewArgon2Hasher(authadapter.DefaultArgon2Config())
+	passwordHash, err := passwordHasher.Hash("correct-password")
+	if err != nil {
+		t.Fatalf("hash password error = %v", err)
+	}
+	if err := uow.WithinTransaction(t.Context(), func(ctx context.Context, tx ports.Transaction) error {
+		return tx.AuthIdentities().Save(ctx, &ports.AuthIdentity{UserID: "multi-user", PasswordHash: passwordHash})
+	}); err != nil {
+		t.Fatalf("seed auth identity error = %v", err)
+	}
+
+	secretGenerator := authadapter.NewSecretGenerator(authadapter.DefaultTokenConfig())
+	encryptor, err := authadapter.NewTokenEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("NewTokenEncryptor() error = %v", err)
+	}
+	login := usecases.NewLoginUseCase(uow, passwordHasher, secretGenerator, clock)
+	refresh := usecases.NewRefreshSessionUseCase(uow, secretGenerator, encryptor, clock)
+	switchRole := usecases.NewSwitchActiveRoleUseCase(uow, secretGenerator, clock)
+	authenticator := authadapter.NewSessionAuthenticator(uow, postgres.NewPermissionResolver(pool), clock, 0)
+	h := httpadapter.NewHandlerWithEventStreamAndAuthenticationAndSecurity(
+		authenticator,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		login,
+		refresh,
+		usecases.NewLogoutUseCase(uow, clock),
+		usecases.NewChangeOwnPasswordUseCase(uow, passwordHasher, clock),
+		httpadapter.NewRateLimiter(10, time.Minute, false, clock.Now),
+		switchRole,
+		usecases.NewGetMeUseCase(uow),
+	)
+	server := httptest.NewServer(h)
+	t.Cleanup(server.Close)
+
+	loginResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]string{"username": "multi-user", "password": "correct-password"})
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", loginResp.StatusCode)
+	}
+	var initialTokens struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decodeJSONResponse(t, loginResp, &initialTokens)
+
+	forbiddenSwitchResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/switch-role", initialTokens.AccessToken, map[string]string{"active_role": "admin"})
+	if forbiddenSwitchResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("switch to unheld admin role status = %d, want 403", forbiddenSwitchResp.StatusCode)
+	}
+	var forbiddenSwitchError errorEnvelope
+	decodeJSONResponse(t, forbiddenSwitchResp, &forbiddenSwitchError)
+	if forbiddenSwitchError.Error.Code != "forbidden" {
+		t.Fatalf("switch to unheld admin role error code = %q, want forbidden", forbiddenSwitchError.Error.Code)
+	}
+	t.Log(`POST /api/v1/auth/switch-role (admin) -> 403 {"error":{"code":"forbidden"}}`)
+	var sessionCount int
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM sessions WHERE user_id = 'multi-user'`).Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions after forbidden switch error = %v", err)
+	}
+	if sessionCount != 1 {
+		t.Fatalf("sessions after forbidden switch = %d, want 1", sessionCount)
+	}
+
+	switchResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/switch-role", initialTokens.AccessToken, map[string]string{"active_role": "dispatcher"})
+	if switchResp.StatusCode != http.StatusOK {
+		t.Fatalf("switch role status = %d, want 200", switchResp.StatusCode)
+	}
+	var switched struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ActiveRole   string `json:"active_role"`
+	}
+	decodeJSONResponse(t, switchResp, &switched)
+	if switched.ActiveRole != string(domain.ActorRoleDispatcher) || switched.AccessToken == "" || switched.RefreshToken == "" {
+		t.Fatalf("switch response = %+v, want new dispatcher tokens", switched)
+	}
+	t.Log(`POST /api/v1/auth/switch-role -> 200 {"access_token":"[redacted]","refresh_token":"[redacted]","active_role":"dispatcher"}`)
+
+	oldRefreshResp := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/refresh", "", map[string]string{"refresh_token": initialTokens.RefreshToken})
+	if oldRefreshResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old refresh status = %d, want 401", oldRefreshResp.StatusCode)
+	}
+	var oldRefreshError errorEnvelope
+	decodeJSONResponse(t, oldRefreshResp, &oldRefreshError)
+	if oldRefreshError.Error.Code != "unauthorized" || oldRefreshError.Error.Message != "invalid refresh token" {
+		t.Fatalf("old refresh error = %+v, want generic invalid refresh token", oldRefreshError)
+	}
+	t.Log(`POST /api/v1/auth/refresh (old token) -> 401 {"error":{"code":"unauthorized","message":"invalid refresh token"}}`)
+
+	meResp := doJSONRequest(t, server.Client(), http.MethodGet, server.URL+"/api/v1/auth/me", switched.AccessToken, nil)
+	if meResp.StatusCode != http.StatusOK {
+		t.Fatalf("get me status = %d, want 200", meResp.StatusCode)
+	}
+	var me struct {
+		UserID      string   `json:"user_id"`
+		ActiveRole  string   `json:"active_role"`
+		Roles       []string `json:"roles"`
+		Permissions []string `json:"permissions"`
+	}
+	decodeJSONResponse(t, meResp, &me)
+	if me.UserID != "multi-user" || me.ActiveRole != string(domain.ActorRoleDispatcher) {
+		t.Fatalf("get me identity = %+v, want multi-user dispatcher", me)
+	}
+	if !slices.Contains(me.Roles, string(domain.ActorRoleTechnician)) || !slices.Contains(me.Roles, string(domain.ActorRoleDispatcher)) {
+		t.Fatalf("get me roles = %v, want technician and dispatcher", me.Roles)
+	}
+	if !slices.Contains(me.Permissions, domain.PermissionResourceTransferDirect) || slices.Contains(me.Permissions, domain.PermissionRequestCreate) {
+		t.Fatalf("get me permissions = %v, want dispatcher-only permissions", me.Permissions)
+	}
+	meBody, err := json.Marshal(me)
+	if err != nil {
+		t.Fatalf("marshal get me response for log: %v", err)
+	}
+	t.Logf("GET /api/v1/auth/me -> 200 %s", meBody)
+
+	var sessionID string
+	if err := pool.QueryRow(t.Context(), `SELECT id FROM sessions WHERE token_hash = $1`, authadapter.HashTokenSecret(strings.Split(switched.AccessToken, ".")[1])).Scan(&sessionID); err != nil {
+		t.Fatalf("find switched session error = %v", err)
+	}
+	refreshTokenID := strings.TrimSuffix(strings.TrimPrefix(switched.RefreshToken, "rp_rt_"), "."+strings.Split(switched.RefreshToken, ".")[1])
+	var refreshSessionID string
+	if err := pool.QueryRow(t.Context(), `SELECT session_id FROM refresh_tokens WHERE id = $1`, refreshTokenID).Scan(&refreshSessionID); err != nil {
+		t.Fatalf("find switched refresh token session error = %v", err)
+	}
+	if refreshSessionID != sessionID {
+		t.Fatalf("refresh session id = %q, want switched access session %q", refreshSessionID, sessionID)
+	}
+	if _, err := pool.Exec(t.Context(), `DELETE FROM user_roles WHERE user_id = 'multi-user' AND role_code = 'dispatcher'`); err != nil {
+		t.Fatalf("remove dispatcher role error = %v", err)
+	}
+	var activeRoleAssignments int
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM user_roles WHERE user_id = 'multi-user' AND role_code = 'dispatcher'`).Scan(&activeRoleAssignments); err != nil {
+		t.Fatalf("count dispatcher role assignments error = %v", err)
+	}
+	if activeRoleAssignments != 0 {
+		t.Fatalf("dispatcher role assignments = %d, want 0", activeRoleAssignments)
+	}
+	roleRemovedRefresh := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/refresh", "", map[string]string{"refresh_token": switched.RefreshToken})
+	if roleRemovedRefresh.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("refresh after role removal status = %d, want 401", roleRemovedRefresh.StatusCode)
+	}
+	var roleRemovedError errorEnvelope
+	decodeJSONResponse(t, roleRemovedRefresh, &roleRemovedError)
+	if roleRemovedError.Error.Code != "unauthorized" || roleRemovedError.Error.Message != "invalid refresh token" {
+		t.Fatalf("refresh after role removal error = %+v, want generic invalid refresh token", roleRemovedError)
+	}
+	t.Log(`POST /api/v1/auth/refresh (removed active role) -> 401 {"error":{"code":"unauthorized","message":"invalid refresh token"}}`)
+	secondRoleRemovedRefresh := doJSONRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/refresh", "", map[string]string{"refresh_token": switched.RefreshToken})
+	if secondRoleRemovedRefresh.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("second refresh after role removal status = %d, want 401", secondRoleRemovedRefresh.StatusCode)
+	}
+	t.Log(`POST /api/v1/auth/refresh (already revoked session) -> 401 {"error":{"code":"unauthorized","message":"invalid refresh token"}}`)
+	var (
+		revokedAt  *time.Time
+		activeRole string
+	)
+	if err := pool.QueryRow(t.Context(), `SELECT active_role, revoked_at FROM sessions WHERE id = $1`, sessionID).Scan(&activeRole, &revokedAt); err != nil {
+		t.Fatalf("load revoked switched session error = %v", err)
+	}
+	if revokedAt == nil {
+		t.Fatalf("session %s with active role %q was not revoked after active role removal", sessionID, activeRole)
 	}
 }
 

@@ -48,6 +48,7 @@ func newRefreshTestUseCase(t *testing.T, now time.Time) (*RefreshSessionUseCase,
 	tx := &fakeTransaction{
 		sessions:      &fakeSessionRepository{sessions: map[string]*ports.Session{session.ID: session}},
 		refreshTokens: &fakeRefreshTokenRepository{tokens: map[string]*ports.RefreshToken{presented.ID: presented}},
+		userRoles:     &fakeUserRoleRepository{roles: []domain.ActorRole{domain.ActorRoleTechnician}},
 	}
 	clock := &fakeClock{now: now}
 	uc := NewRefreshSessionUseCaseWithConfig(
@@ -60,6 +61,31 @@ func newRefreshTestUseCase(t *testing.T, now time.Time) (*RefreshSessionUseCase,
 		30*time.Second,
 	)
 	return uc, clock, tx, originalToken
+}
+
+func TestRefreshSessionRevokesSessionWhenActiveRoleNoLongerHeld(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	uc, _, tx, originalToken := newRefreshTestUseCase(t, now)
+	tx.userRoles.roles = nil
+
+	_, err := uc.Execute(t.Context(), RefreshSessionInput{RefreshToken: originalToken})
+	if !errors.Is(err, ports.ErrTokenInvalid) {
+		t.Fatalf("Execute() error = %v, want ErrTokenInvalid", err)
+	}
+	if tx.sessions.sessions["session-1"].RevokedAt == nil {
+		t.Fatal("session was not revoked")
+	}
+	if len(tx.audits.events) != 1 {
+		t.Fatalf("audit event count = %d, want 1", len(tx.audits.events))
+	}
+	event := tx.audits.events[0]
+	if event.Action != string(domain.ActionSessionRevoke) || event.Note != "active_role_no_longer_held" {
+		t.Fatalf("audit event = %+v, want session.revoke with active_role_no_longer_held", event)
+	}
+	_, err = uc.Execute(t.Context(), RefreshSessionInput{RefreshToken: originalToken})
+	if !errors.Is(err, ports.ErrTokenInvalid) {
+		t.Fatalf("second Execute() error = %v, want ErrTokenInvalid", err)
+	}
 }
 
 func TestRefreshSessionGraceReturnsOriginalSuccessor_D2(t *testing.T) {

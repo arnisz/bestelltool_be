@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"bestelltool_be/internal/application/ports"
@@ -203,73 +204,11 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 			}
 		}
 
-		// Generate access and refresh tokens (both plaintext).
-		accessSecret, err := uc.secretGenerator.GenerateToken()
+		session, accessToken, refreshToken, err := issueSessionWithTokens(
+			ctx, tx, uc.secretGenerator, uc.clock, user.ID, user.Role, uc.accessTokenTTL, uc.refreshTokenTTL,
+		)
 		if err != nil {
-			return fmt.Errorf("generate access token secret: %w", err)
-		}
-		refreshSecret, err := uc.secretGenerator.GenerateToken()
-		if err != nil {
-			return fmt.Errorf("generate refresh token secret: %w", err)
-		}
-
-		accessTokenID, err := generateTokenID()
-		if err != nil {
-			return fmt.Errorf("generate access token id: %w", err)
-		}
-		refreshTokenID, err := generateTokenID()
-		if err != nil {
-			return fmt.Errorf("generate refresh token id: %w", err)
-		}
-
-		accessToken := accessTokenPrefix + accessTokenID + "." + accessSecret
-		refreshToken := refreshTokenPrefix + refreshTokenID + "." + refreshSecret
-
-		// Hash both tokens for storage.
-		accessTokenHash := sha256.Sum256([]byte(accessSecret))
-		refreshTokenHash := sha256.Sum256([]byte(refreshSecret))
-
-		now := uc.clock.Now()
-		sessionID, err := generateTokenID() // Use same ID generation as token IDs
-		if err != nil {
-			return fmt.Errorf("generate session id: %w", err)
-		}
-		familyID, err := generateTokenID() // All tokens from this login share a family
-		if err != nil {
-			return fmt.Errorf("generate refresh family id: %w", err)
-		}
-		refreshTokenEntityID, err := generateTokenID()
-		if err != nil {
-			return fmt.Errorf("generate refresh token entity id: %w", err)
-		}
-
-		// Create and save Session.
-		session := &ports.Session{
-			ID:         sessionID,
-			UserID:     user.ID,
-			ActiveRole: user.Role,
-			TokenHash:  accessTokenHash[:],
-			CreatedAt:  now,
-			ExpiresAt:  now.Add(uc.accessTokenTTL),
-			RevokedAt:  nil,
-		}
-		if err := tx.Sessions().Save(ctx, session); err != nil {
-			return fmt.Errorf("save session: %w", err)
-		}
-
-		// Create and save RefreshToken.
-		refreshTokenEntity := &ports.RefreshToken{
-			ID:               refreshTokenEntityID,
-			SessionID:        sessionID,
-			TokenHash:        refreshTokenHash[:],
-			FamilyID:         familyID,
-			SuccessorTokenID: nil,
-			CreatedAt:        now,
-			ExpiresAt:        now.Add(uc.refreshTokenTTL),
-			RevokedAt:        nil,
-		}
-		if err := tx.RefreshTokens().Save(ctx, refreshTokenEntity); err != nil {
-			return fmt.Errorf("save refresh token: %w", err)
+			return err
 		}
 
 		event := newAuditEvent(
@@ -304,6 +243,58 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 	return output, nil
 }
 
+func issueSessionWithTokens(
+	ctx context.Context,
+	tx ports.Transaction,
+	secretGenerator ports.SecretGenerator,
+	clock ports.Clock,
+	userID domain.UserID,
+	role domain.ActorRole,
+	accessTokenTTL time.Duration,
+	refreshTokenTTL time.Duration,
+) (session *ports.Session, accessToken, refreshToken string, err error) {
+	accessSecret, err := secretGenerator.GenerateToken()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("generate access token secret: %w", err)
+	}
+	accessSecret = generatedTokenSecret(accessSecret)
+	refreshSecret, err := secretGenerator.GenerateToken()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("generate refresh token secret: %w", err)
+	}
+	refreshSecret = generatedTokenSecret(refreshSecret)
+	accessTokenID, err := generateTokenID()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("generate access token id: %w", err)
+	}
+	refreshTokenID, err := generateTokenID()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("generate refresh token id: %w", err)
+	}
+	accessToken = accessTokenPrefix + accessTokenID + "." + accessSecret
+	refreshToken = refreshTokenPrefix + refreshTokenID + "." + refreshSecret
+	accessTokenHash := sha256.Sum256([]byte(accessSecret))
+	refreshTokenHash := sha256.Sum256([]byte(refreshSecret))
+	now := clock.Now()
+	sessionID, err := generateTokenID()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("generate session id: %w", err)
+	}
+	familyID, err := generateTokenID()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("generate refresh family id: %w", err)
+	}
+	session = &ports.Session{ID: sessionID, UserID: userID, ActiveRole: role, TokenHash: accessTokenHash[:], CreatedAt: now, ExpiresAt: now.Add(accessTokenTTL)}
+	if err := tx.Sessions().Save(ctx, session); err != nil {
+		return nil, "", "", fmt.Errorf("save session: %w", err)
+	}
+	refreshTokenEntity := &ports.RefreshToken{ID: refreshTokenID, SessionID: sessionID, TokenHash: refreshTokenHash[:], FamilyID: familyID, CreatedAt: now, ExpiresAt: now.Add(refreshTokenTTL)}
+	if err := tx.RefreshTokens().Save(ctx, refreshTokenEntity); err != nil {
+		return nil, "", "", fmt.Errorf("save refresh token: %w", err)
+	}
+	return session, accessToken, refreshToken, nil
+}
+
 // generateTokenID returns a random UUID-style hex string (32 chars) for use in
 // token IDs and family IDs. Uses crypto/rand for security.
 func generateTokenID() (string, error) {
@@ -312,4 +303,15 @@ func generateTokenID() (string, error) {
 		return "", fmt.Errorf("crypto/rand read: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+func generatedTokenSecret(generated string) string {
+	if !(strings.HasPrefix(generated, accessTokenPrefix) || strings.HasPrefix(generated, refreshTokenPrefix)) {
+		return generated
+	}
+	_, secret, ok := strings.Cut(generated, ".")
+	if !ok || secret == "" || strings.Contains(secret, ".") {
+		return generated
+	}
+	return secret
 }

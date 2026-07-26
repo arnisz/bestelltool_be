@@ -144,3 +144,34 @@ func TestAuthenticate_CorrectPrincipalReturned(t *testing.T) {
 		t.Fatalf("role = %q, want dispatcher", p.Role)
 	}
 }
+
+func TestParseStaticTokensAppliesOperationalPermissions_SEC15(t *testing.T) {
+	a, err := ParseStaticTokens("tech:technician-1:technician,dispatcher:dispatcher-1:dispatcher,admin:admin-1:admin")
+	if err != nil {
+		t.Fatalf("ParseStaticTokens() error = %v", err)
+	}
+
+	technician, err := a.Authenticate(t.Context(), "tech")
+	if err != nil {
+		t.Fatalf("Authenticate(technician) error = %v", err)
+	}
+	if !technician.HasPermission(domain.PermissionRequestCreate) || technician.HasPermission(domain.PermissionResourceTransferDirect) {
+		t.Fatal("technician permission mapping does not match the operational catalog")
+	}
+
+	dispatcher, err := a.Authenticate(t.Context(), "dispatcher")
+	if err != nil {
+		t.Fatalf("Authenticate(dispatcher) error = %v", err)
+	}
+	if !dispatcher.HasPermission(domain.PermissionAllocationReturnRequest) || !dispatcher.HasPermission(domain.PermissionResourceTransferDirect) {
+		t.Fatal("dispatcher permission mapping does not match the operational catalog")
+	}
+
+	admin, err := a.Authenticate(t.Context(), "admin")
+	if err != nil {
+		t.Fatalf("Authenticate(admin) error = %v", err)
+	}
+	if admin.HasPermission(domain.PermissionRequestRead) || admin.HasPermission(domain.PermissionResourceTransferDirect) {
+		t.Fatal("admin must not receive operational permissions")
+	}
+}

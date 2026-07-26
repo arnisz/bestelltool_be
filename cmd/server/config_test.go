@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func setBaseEnv(t *testing.T) {
@@ -23,6 +24,28 @@ func TestLoadConfigFromEnvRunMigrationsDefaultFalse(t *testing.T) {
 	}
 	if cfg.RunMigrations {
 		t.Fatalf("cfg.RunMigrations = %t, want false", cfg.RunMigrations)
+	}
+}
+
+func TestLoadConfigFromEnvPrincipalCacheTTL_SEC11(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("PRINCIPAL_CACHE_TTL", "")
+
+	cfg, err := loadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("loadConfigFromEnv() error = %v", err)
+	}
+	if cfg.PrincipalCacheTTL != 30*time.Second {
+		t.Fatalf("cfg.PrincipalCacheTTL = %s, want 30s", cfg.PrincipalCacheTTL)
+	}
+
+	t.Setenv("PRINCIPAL_CACHE_TTL", "45s")
+	cfg, err = loadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("loadConfigFromEnv() custom TTL error = %v", err)
+	}
+	if cfg.PrincipalCacheTTL != 45*time.Second {
+		t.Fatalf("cfg.PrincipalCacheTTL = %s, want 45s", cfg.PrincipalCacheTTL)
 	}
 }
 

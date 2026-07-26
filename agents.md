@@ -291,6 +291,7 @@ go test -count=1 -p 1 -race ./...             # mit TEST_DATABASE_URL gesetzt
 ```
 
 *   `-race` ist für die Concurrency-Tests (Last-Admin-Guard, Broker, Principal-Cache) verpflichtend.
+*   **Windows-Race-Tests:** Führe `go test -race` unter Windows ausschließlich in WSL2 aus. Versuche nicht, die native Visual-Studio-/Windows-C-Toolchain dafür einzurichten, zu wechseln oder zu diagnostizieren. Starte `db-test` auf dem Windows-Host mit der Portfreigabe `"5433:5432"`, ermittle in WSL2 die Windows-Host-IP und verwende diese in `TEST_DATABASE_URL`; die vollständige Anweisung steht in `README.md` unter „Race Tests from WSL2“.
 *   **Green skips sind kein Beweis.** Wenn `TEST_DATABASE_URL` nicht gesetzt ist, überspringen sich die Postgres-Tests selbst und der Lauf ist trotzdem grün. Der Agent muss vor der Erfolgsmeldung prüfen, dass tatsächlich integriert getestet wurde:
 
     ```bash

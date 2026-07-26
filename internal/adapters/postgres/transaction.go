@@ -31,6 +31,10 @@ func (t *txAdapter) Users() ports.UserRepository {
 	return &userRepository{q: t.state.q}
 }
 
+func (t *txAdapter) UserRoles() ports.UserRoleRepository {
+	return &userRoleRepository{q: t.state.q}
+}
+
 func (t *txAdapter) ResourceClasses() ports.ResourceClassRepository {
 	return &resourceClassRepository{q: t.state.q}
 }

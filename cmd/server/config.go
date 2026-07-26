@@ -21,15 +21,17 @@ type serverConfig struct {
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+	PrincipalCacheTTL time.Duration
 }
 
 func loadConfigFromEnv() (serverConfig, error) {
 	const (
-		defaultHTTPAddr        = ":8080"
-		defaultReadTimeout     = 15 * time.Second
-		defaultWriteTimeout    = 15 * time.Second
-		defaultIdleTimeout     = 60 * time.Second
-		defaultShutdownTimeout = 10 * time.Second
+		defaultHTTPAddr          = ":8080"
+		defaultReadTimeout       = 15 * time.Second
+		defaultWriteTimeout      = 15 * time.Second
+		defaultIdleTimeout       = 60 * time.Second
+		defaultShutdownTimeout   = 10 * time.Second
+		defaultPrincipalCacheTTL = 30 * time.Second
 	)
 
 	cfg := serverConfig{
@@ -102,11 +104,16 @@ func loadConfigFromEnv() (serverConfig, error) {
 	if err != nil {
 		return serverConfig{}, err
 	}
+	principalCacheTTL, err := parseDurationEnv("PRINCIPAL_CACHE_TTL", defaultPrincipalCacheTTL)
+	if err != nil {
+		return serverConfig{}, err
+	}
 
 	cfg.ReadTimeout = readTimeout
 	cfg.WriteTimeout = writeTimeout
 	cfg.IdleTimeout = idleTimeout
 	cfg.ShutdownTimeout = shutdownTimeout
+	cfg.PrincipalCacheTTL = principalCacheTTL
 
 	return cfg, nil
 }

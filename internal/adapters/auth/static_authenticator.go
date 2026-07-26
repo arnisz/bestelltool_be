@@ -51,7 +51,11 @@ func ParseStaticTokens(raw string) (*StaticTokenAuthenticator, error) {
 		default:
 			return nil, fmt.Errorf("invalid role %q in token entry %q", roleStr, entry)
 		}
-		tokens[token] = &ports.Principal{UserID: domain.UserID(userID), Role: role}
+		tokens[token] = &ports.Principal{
+			UserID:      domain.UserID(userID),
+			Role:        role,
+			Permissions: staticRolePermissions(role),
+		}
 	}
 
 	if len(tokens) == 0 {
@@ -68,4 +72,33 @@ func (a *StaticTokenAuthenticator) Authenticate(_ context.Context, token string)
 		return nil, fmt.Errorf("token not recognized: %w", ports.ErrUnauthenticated)
 	}
 	return p, nil
+}
+
+func staticRolePermissions(role domain.ActorRole) map[string]struct{} {
+	permissions := make(map[string]struct{})
+	for _, code := range staticRolePermissionCodes(role) {
+		permissions[code] = struct{}{}
+	}
+	return permissions
+}
+
+func staticRolePermissionCodes(role domain.ActorRole) []string {
+	switch role {
+	case domain.ActorRoleTechnician:
+		return []string{
+			domain.PermissionRequestCreate,
+			domain.PermissionRequestRead,
+			domain.PermissionAllocationReturnRequest,
+			domain.PermissionEventStreamOwn,
+		}
+	case domain.ActorRoleDispatcher:
+		return []string{
+			domain.PermissionRequestRead,
+			domain.PermissionAllocationReturnRequest,
+			domain.PermissionResourceTransferDirect,
+			domain.PermissionEventStreamAll,
+		}
+	default:
+		return nil
+	}
 }

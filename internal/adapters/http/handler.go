@@ -41,6 +41,16 @@ type ChangeOwnPasswordUseCase interface {
 	Execute(ctx context.Context, in usecases.ChangeOwnPasswordInput) error
 }
 
+// SwitchActiveRoleUseCase is the inbound port for switching the active role.
+type SwitchActiveRoleUseCase interface {
+	Execute(ctx context.Context, in usecases.SwitchActiveRoleInput) (*usecases.SwitchActiveRoleOutput, error)
+}
+
+// GetMeUseCase is the inbound port for reading the authenticated user's roles.
+type GetMeUseCase interface {
+	Execute(ctx context.Context, in usecases.GetMeInput) (*usecases.GetMeOutput, error)
+}
+
 // CreateRequestUseCase is the inbound port for creating requests.
 type CreateRequestUseCase interface {
 	Execute(ctx context.Context, in usecases.CreateRequestInput) (*domain.Request, error)
@@ -82,6 +92,8 @@ type handler struct {
 	refreshSession    RefreshSessionUseCase
 	logout            LogoutUseCase
 	changeOwnPassword ChangeOwnPasswordUseCase
+	switchActiveRole  SwitchActiveRoleUseCase
+	getMe             GetMeUseCase
 	rateLimiter       *RateLimiter
 	createRequest     CreateRequestUseCase
 	getRequest        GetRequestUseCase
@@ -91,9 +103,27 @@ type handler struct {
 	now               func() time.Time
 }
 
+type routeAuthorizationKind string
+
+const (
+	routeAuthorizationPermission    routeAuthorizationKind = "permission"
+	routeAuthorizationAnyPermission routeAuthorizationKind = "any_permission"
+	routeAuthorizationSelfService   routeAuthorizationKind = "self_service"
+)
+
+type routeDescriptor struct {
+	Method      string
+	Pattern     string
+	Kind        routeAuthorizationKind
+	Permissions []string
+}
+
+type routeRegistry struct {
+	routes []routeDescriptor
+}
+
 type createRequestPayload struct {
 	RequestID                string       `json:"request_id"`
-	TechnicianID             string       `json:"technician_id"`
 	ContextRef               string       `json:"context_ref"`
 	ContextLabel             string       `json:"context_label"`
 	WishFrom                 *time.Time   `json:"wish_from,omitzero"`
@@ -210,7 +240,7 @@ func NewHandlerWithEventStreamAndAuthentication(
 	refreshSession RefreshSessionUseCase,
 	logout LogoutUseCase,
 ) http.Handler {
-	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now, login, refreshSession, logout, nil, nil)
+	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now, login, refreshSession, logout, nil, nil, nil, nil)
 }
 
 // NewHandlerWithEventStreamAndAuthenticationAndSecurity builds the HTTP
@@ -227,8 +257,10 @@ func NewHandlerWithEventStreamAndAuthenticationAndSecurity(
 	logout LogoutUseCase,
 	changeOwnPassword ChangeOwnPasswordUseCase,
 	rateLimiter *RateLimiter,
+	switchActiveRole SwitchActiveRoleUseCase,
+	getMe GetMeUseCase,
 ) http.Handler {
-	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now, login, refreshSession, logout, changeOwnPassword, rateLimiter)
+	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now, login, refreshSession, logout, changeOwnPassword, rateLimiter, switchActiveRole, getMe)
 }
 
 // NewHandlerWithClock builds the HTTP adapter and allows deterministic tests.
@@ -271,7 +303,7 @@ func NewHandlerWithEventStreamAndClockAndLogin(
 	now func() time.Time,
 	login LoginUseCase,
 ) http.Handler {
-	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, now, login, nil, nil, nil, nil)
+	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, now, login, nil, nil, nil, nil, nil, nil)
 }
 
 // NewHandlerWithEventStreamAndClockAndAuthentication builds the HTTP adapter
@@ -288,7 +320,7 @@ func NewHandlerWithEventStreamAndClockAndAuthentication(
 	refreshSession RefreshSessionUseCase,
 	logout LogoutUseCase,
 ) http.Handler {
-	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, now, login, refreshSession, logout, nil, nil)
+	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, now, login, refreshSession, logout, nil, nil, nil, nil)
 }
 
 // NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity builds the
@@ -306,6 +338,8 @@ func NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(
 	logout LogoutUseCase,
 	changeOwnPassword ChangeOwnPasswordUseCase,
 	rateLimiter *RateLimiter,
+	switchActiveRole SwitchActiveRoleUseCase,
+	getMe GetMeUseCase,
 ) http.Handler {
 	if now == nil {
 		now = time.Now
@@ -319,6 +353,8 @@ func NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(
 		refreshSession:    refreshSession,
 		logout:            logout,
 		changeOwnPassword: changeOwnPassword,
+		switchActiveRole:  switchActiveRole,
+		getMe:             getMe,
 		rateLimiter:       rateLimiter,
 		createRequest:     createRequest,
 		getRequest:        getRequest,
@@ -328,37 +364,11 @@ func NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(
 		now:               now,
 	}
 
-	// Inner mux: each route carries an explicit role allowlist via requireRoles.
-	// Order: authMiddleware → requireRoles → handler.
+	// Inner mux: each route carries an explicit authorization declaration.
+	// Order: authMiddleware → authorization middleware → handler.
 	protected := http.NewServeMux()
-	protected.Handle("POST /api/v1/requests",
-		requireRoles(domain.ActorRoleTechnician)(
-			http.HandlerFunc(h.handleCreateRequest),
-		))
-	protected.Handle("GET /api/v1/requests/{id}",
-		requireRoles(domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleAdmin)(
-			http.HandlerFunc(h.handleGetRequest),
-		))
-	protected.Handle("POST /api/v1/allocations/{id}/return-request",
-		requireRoles(domain.ActorRoleTechnician)(
-			http.HandlerFunc(h.handleRequestReturn),
-		))
-	protected.Handle("POST /api/v1/resources/{id}/transfer",
-		requireRoles(domain.ActorRoleDispatcher)(
-			http.HandlerFunc(h.handleTransferResource),
-		))
-	protected.Handle("GET /api/v1/events",
-		requireRoles(domain.ActorRoleDispatcher, domain.ActorRoleTechnician)(
-			http.HandlerFunc(h.handleEvents),
-		))
-	protected.Handle("POST /api/v1/auth/logout",
-		requireRoles(domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleAdmin)(
-			http.HandlerFunc(h.handleLogout),
-		))
-	protected.Handle("POST /api/v1/auth/password/change",
-		requireRoles(domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleAdmin)(
-			http.HandlerFunc(h.handleChangeOwnPassword),
-		))
+	routes := &routeRegistry{}
+	registerProtectedRoutes(protected, routes, h)
 
 	// Outer mux: public routes live directly on this mux; /api/v1/ stays
 	// auth-guarded except explicit public endpoints.
@@ -369,6 +379,33 @@ func NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(
 	mux.Handle("/api/v1/", authMiddleware(auth, protected))
 
 	return mux
+}
+
+func registerProtectedRoutes(mux *http.ServeMux, routes *routeRegistry, h *handler) {
+	registerPermission(mux, routes, http.MethodPost, "/api/v1/requests", []string{domain.PermissionRequestCreate}, http.HandlerFunc(h.handleCreateRequest))
+	registerPermission(mux, routes, http.MethodGet, "/api/v1/requests/{id}", []string{domain.PermissionRequestRead}, http.HandlerFunc(h.handleGetRequest))
+	registerPermission(mux, routes, http.MethodPost, "/api/v1/allocations/{id}/return-request", []string{domain.PermissionAllocationReturnRequest}, http.HandlerFunc(h.handleRequestReturn))
+	registerPermission(mux, routes, http.MethodPost, "/api/v1/resources/{id}/transfer", []string{domain.PermissionResourceTransferDirect}, http.HandlerFunc(h.handleTransferResource))
+	registerAnyPermission(mux, routes, http.MethodGet, "/api/v1/events", []string{domain.PermissionEventStreamOwn, domain.PermissionEventStreamAll}, http.HandlerFunc(h.handleEvents))
+	registerSelfService(mux, routes, http.MethodPost, "/api/v1/auth/logout", http.HandlerFunc(h.handleLogout))
+	registerSelfService(mux, routes, http.MethodPost, "/api/v1/auth/password/change", http.HandlerFunc(h.handleChangeOwnPassword))
+	registerSelfService(mux, routes, http.MethodPost, "/api/v1/auth/switch-role", http.HandlerFunc(h.handleSwitchActiveRole))
+	registerSelfService(mux, routes, http.MethodGet, "/api/v1/auth/me", http.HandlerFunc(h.handleGetMe))
+}
+
+func registerPermission(mux *http.ServeMux, routes *routeRegistry, method, pattern string, permissions []string, next http.Handler) {
+	routes.routes = append(routes.routes, routeDescriptor{Method: method, Pattern: pattern, Kind: routeAuthorizationPermission, Permissions: permissions})
+	mux.Handle(method+" "+pattern, requirePermissions(permissions...)(next))
+}
+
+func registerAnyPermission(mux *http.ServeMux, routes *routeRegistry, method, pattern string, permissions []string, next http.Handler) {
+	routes.routes = append(routes.routes, routeDescriptor{Method: method, Pattern: pattern, Kind: routeAuthorizationAnyPermission, Permissions: permissions})
+	mux.Handle(method+" "+pattern, requireAnyPermission(permissions...)(next))
+}
+
+func registerSelfService(mux *http.ServeMux, routes *routeRegistry, method, pattern string, next http.Handler) {
+	routes.routes = append(routes.routes, routeDescriptor{Method: method, Pattern: pattern, Kind: routeAuthorizationSelfService})
+	mux.Handle(method+" "+pattern, requireAuthenticated()(next))
 }
 
 // requireRoles returns a middleware that enforces one of the allowed roles on the
@@ -393,6 +430,62 @@ func requireRoles(allowed ...domain.ActorRole) func(http.Handler) http.Handler {
 				}
 			}
 			writeMappedError(w, ports.ErrForbidden)
+		})
+	}
+}
+
+// requirePermissions returns middleware that requires all declared permissions.
+// It must be applied after authMiddleware.
+func requirePermissions(codes ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, ok := PrincipalFromContext(r.Context())
+			if !ok {
+				writeMappedError(w, fmt.Errorf("principal not in context: programming error"))
+				return
+			}
+			for _, code := range codes {
+				if !p.HasPermission(code) {
+					writeMappedError(w, ports.ErrForbidden)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// requireAnyPermission returns middleware that requires at least one declared permission.
+// It must be applied after authMiddleware.
+func requireAnyPermission(codes ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, ok := PrincipalFromContext(r.Context())
+			if !ok {
+				writeMappedError(w, fmt.Errorf("principal not in context: programming error"))
+				return
+			}
+			for _, code := range codes {
+				if p.HasPermission(code) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			writeMappedError(w, ports.ErrForbidden)
+		})
+	}
+}
+
+// requireAuthenticated returns middleware that requires an authenticated Principal.
+// It must be applied after authMiddleware.
+func requireAuthenticated() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := PrincipalFromContext(r.Context()); !ok {
+				writeMappedError(w, fmt.Errorf("principal not in context: programming error"))
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }
@@ -446,10 +539,15 @@ func (h *handler) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	if payload.CreatedAt != nil {
 		createdAt = payload.CreatedAt.UTC()
 	}
+	p, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		writeMappedError(w, fmt.Errorf("principal not in context: programming error"))
+		return
+	}
 
 	in := usecases.CreateRequestInput{
 		RequestID:                domain.RequestID(payload.RequestID),
-		TechnicianID:             domain.UserID(payload.TechnicianID),
+		TechnicianID:             p.UserID,
 		ContextRef:               payload.ContextRef,
 		ContextLabel:             payload.ContextLabel,
 		WishFrom:                 payload.WishFrom,

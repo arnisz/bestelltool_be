@@ -63,6 +63,8 @@ func run() error {
 	refreshSessionUseCase := usecases.NewRefreshSessionUseCase(uow, secretGenerator, tokenEncryptor, clock)
 	logoutUseCase := usecases.NewLogoutUseCase(uow, clock)
 	changeOwnPasswordUseCase := usecases.NewChangeOwnPasswordUseCase(uow, passwordHasher, clock)
+	switchActiveRoleUseCase := usecases.NewSwitchActiveRoleUseCase(uow, secretGenerator, clock)
+	getMeUseCase := usecases.NewGetMeUseCase(uow)
 	var authenticator ports.Authenticator
 	if cfg.AuthMode == "static" {
 		authenticator, err = authadapter.ParseStaticTokens(cfg.StaticTokens)
@@ -70,7 +72,7 @@ func run() error {
 			return fmt.Errorf("parse static tokens: %w", err)
 		}
 	} else {
-		authenticator = authadapter.NewSessionAuthenticator(uow, clock)
+		authenticator = authadapter.NewSessionAuthenticator(uow, postgres.NewPermissionResolver(pool), clock, cfg.PrincipalCacheTTL)
 	}
 	requestRepo := postgres.NewRequestRepository(pool)
 	eventStream := sse.NewBroker(0)
@@ -87,6 +89,8 @@ func run() error {
 		logoutUseCase,
 		changeOwnPasswordUseCase,
 		httpadapter.NewRateLimiter(10, time.Minute, cfg.TrustProxyHeaders, time.Now),
+		switchActiveRoleUseCase,
+		getMeUseCase,
 	)
 
 	srv := &http.Server{

@@ -8,9 +8,20 @@ import (
 
 // Principal represents an authenticated user identity.
 type Principal struct {
-	UserID    domain.UserID
-	Role      domain.ActorRole
-	SessionID string
+	UserID      domain.UserID
+	Role        domain.ActorRole
+	SessionID   string
+	Permissions map[string]struct{}
+}
+
+// HasPermission reports whether the permission code is granted to this
+// Principal's active role. Permissions are resolved server-side from current
+// database state at authentication time (SEC-14) and cached together with the
+// rest of the Principal (SEC-11), so a revoked permission takes effect within
+// the same bound as a revoked role.
+func (p Principal) HasPermission(code string) bool {
+	_, ok := p.Permissions[code]
+	return ok
 }
 
 // Authenticator verifies a bearer token and returns the associated Principal.
@@ -23,6 +34,11 @@ type UserRepository interface {
 	GetByID(ctx context.Context, id domain.UserID) (*domain.User, error)
 	GetByUsername(ctx context.Context, username string) (*domain.User, error)
 	Create(ctx context.Context, u *domain.User) error
+}
+
+// UserRoleRepository provides access to roles currently assigned to a user.
+type UserRoleRepository interface {
+	RolesForUser(ctx context.Context, userID domain.UserID) ([]domain.ActorRole, error)
 }
 
 // ResourceClassRepository provides persistence access for resource classes.
@@ -82,6 +98,7 @@ type IdempotencyStore interface {
 // Transaction provides transaction-bound repositories and writers.
 type Transaction interface {
 	Users() UserRepository
+	UserRoles() UserRoleRepository
 	ResourceClasses() ResourceClassRepository
 	Requests() RequestRepository
 	Resources() ResourceRepository

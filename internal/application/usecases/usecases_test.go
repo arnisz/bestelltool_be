@@ -54,6 +54,7 @@ type fakeTx struct {
 }
 
 func (t *fakeTx) Users() ports.UserRepository                    { return t.users }
+func (t *fakeTx) UserRoles() ports.UserRoleRepository            { return nil }
 func (t *fakeTx) ResourceClasses() ports.ResourceClassRepository { return t.resourceClasses }
 func (t *fakeTx) Requests() ports.RequestRepository              { return t.requests }
 func (t *fakeTx) Resources() ports.ResourceRepository            { return t.resources }

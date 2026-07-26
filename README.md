@@ -299,7 +299,7 @@ TEST_DATABASE_URL="postgres://dev:dev@${WIN_IP}:5433/resource_test?sslmode=disab
   go test -count=1 -p 1 -race ./...
 ```
 
-Before running this command, verify that the URL still targets only `resource_test` on port `5433`. The integration-test cleanup drops the `public` schema, so it must never point at the development database on port `5432`. This WSL2 setup is the supported local path for the mandatory race run when the Windows Go toolchain has no suitable C compiler.
+Before running this command, verify that the URL still targets only `resource_test` on port `5433`. The integration-test cleanup drops the `public` schema, so it must never point at the development database on port `5432`. On Windows, this WSL2 setup is the only supported path for the mandatory race run. Do not attempt to configure, switch, or diagnose the native Visual Studio/Windows C toolchain for `go test -race`.
 
 ## Development with GoLand
 
