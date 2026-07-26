@@ -205,7 +205,9 @@ TEST_DATABASE_URL="postgres://user:pass@host/dbname" go test -count=1 -p 1 ./int
 
 Use `-p 1` here because the postgres and http packages otherwise access the same test database in parallel.
 
-Open question (do not implement in this step): should integration tests use schema isolation per package so they can safely run in parallel again?
+**Test cleanup is a schema reset, not `TRUNCATE` (since migration `000006`)**: `audit_events` blocks `UPDATE`/`DELETE`/`TRUNCATE` via trigger (SEC-20), and `audit_events.actor_id` references `users(id)`, so `TRUNCATE users CASCADE` would hit the same trigger. Both `internal/adapters/postgres/postgres_test.go` and `internal/adapters/http/e2e_test.go` run `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` on a dedicated connection, then `RunEmbeddedMigrations`, strictly before creating the `pgxpool.Pool` the test itself uses — never `TRUNCATE`. Do not reintroduce `TRUNCATE`-based cleanup for these tables. See `migrations/README.md` for the pgx v5 cached-plan/OID rationale.
+
+Open question (do not implement in this step): should integration tests use schema isolation per package so they can safely run in parallel again? The schema-reset-per-test approach above still resets the single shared `public` schema, so `-p 1` remains required.
 
 At the end of every phase, run the integration tests against the real test database. Green skips are not sufficient once the environment is available.
 
@@ -220,7 +222,7 @@ At the end of every phase, run the integration tests against the real test datab
 | SEC-15 | admin attempting a direct transfer → `403` |
 | SEC-16 | self role assignment → rejected by use case *and* by DB `CHECK` |
 | SEC-18 | two parallel last-admin removals → exactly one succeeds |
-| SEC-20 | `UPDATE`/`DELETE` on `audit_events` → error |
+| SEC-20 | `UPDATE`/`DELETE`/`TRUNCATE` on `audit_events` → error with SQLSTATE `42501` (not text match) |
 | SEC-25 | `refdata_tool` DB role cannot read identity/session/audit tables |
 
 ### Environment Variables (Server)

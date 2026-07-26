@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -26,6 +27,7 @@ func testPool(t *testing.T) *pgxpool.Pool {
 		t.Skip("TEST_DATABASE_URL nicht gesetzt: PostgreSQL-Integrationstests werden übersprungen")
 	}
 	assertTestDatabaseURL(t, dbURL)
+	resetSchema(t, dbURL)
 	if err := RunEmbeddedMigrations(t.Context(), dbURL); err != nil {
 		t.Fatalf("RunEmbeddedMigrations() error = %v", err)
 	}
@@ -33,11 +35,37 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("NewPool() error = %v", err)
 	}
-	truncateAll(t, pool)
 	t.Cleanup(func() {
 		pool.Close()
 	})
 	return pool
+}
+
+// resetSchema drops and recreates the public schema on a dedicated, short-lived
+// connection - never on the pgxpool.Pool the test itself will use.
+//
+// Why not TRUNCATE (E2): audit_events.actor_id references users(id). Migration
+// 000006 blocks UPDATE/DELETE/TRUNCATE on audit_events with a BEFORE trigger, so
+// `TRUNCATE users CASCADE` would cascade into audit_events and fail the trigger,
+// breaking test setup itself. A full schema reset sidesteps the append-only
+// guard entirely instead of trying to punch a hole in it for tests.
+//
+// Why a dedicated connection (E1): pgx v5 caches prepared statement plans and
+// type OIDs per connection. If the schema were rebuilt using a connection already
+// pooled by pgxpool, subsequent queries on that same connection can fail with
+// "cached plan must not change result type" or stale-OID errors. Resetting on a
+// throwaway connection that is closed before the pgxpool.Pool is ever created
+// avoids the problem by construction - the pool never sees a pre-reset plan.
+func resetSchema(t *testing.T, dbURL string) {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), dbURL)
+	if err != nil {
+		t.Fatalf("connect for schema reset error = %v", err)
+	}
+	defer conn.Close(t.Context())
+	if _, err := conn.Exec(t.Context(), `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
+		t.Fatalf("reset schema error = %v", err)
+	}
 }
 
 func assertTestDatabaseURL(t *testing.T, dbURL string) {
@@ -52,24 +80,6 @@ func assertTestDatabaseURL(t *testing.T, dbURL string) {
 	}
 	if !strings.Contains(strings.ToLower(dbName), "test") {
 		t.Fatalf("unsichere Testdatenbank %q: Datenbankname muss klar als Testdatenbank erkennbar sein", dbName)
-	}
-}
-
-func truncateAll(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-	_, err := pool.Exec(t.Context(), `
-TRUNCATE TABLE
-    audit_events,
-    idempotency_outcomes,
-    allocations,
-    request_resource_classes,
-    requests,
-    resources,
-    resource_classes,
-    users
-RESTART IDENTITY CASCADE`)
-	if err != nil {
-		t.Fatalf("truncate tables error = %v", err)
 	}
 }
 
@@ -125,7 +135,6 @@ VALUES ($1, $2, $3, 'allocated', $4, $5, NULL, NULL, NULL, 1, $4, $4)
 
 func TestUnitOfWorkCommitAndRollback(t *testing.T) {
 	pool := testPool(t)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	uow := NewUnitOfWork(pool)
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
@@ -225,7 +234,6 @@ func TestUnitOfWorkCommitAndRollback(t *testing.T) {
 
 func TestUnitOfWorkRollbackWhenAuditWriteFails(t *testing.T) {
 	pool := testPool(t)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	uow := NewUnitOfWork(pool)
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
@@ -269,7 +277,6 @@ func TestUnitOfWorkRollbackWhenAuditWriteFails(t *testing.T) {
 
 func TestIdempotencyOutcomeReplay(t *testing.T) {
 	pool := testPool(t)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	store := &idempotencyStore{q: pool}
 	res := ports.IdempotencyResult{StatusCode: 409, Payload: []byte(`{"ok":false}`), ErrorText: "conflict"}
@@ -315,7 +322,6 @@ func TestIdempotencyOutcomeReplay(t *testing.T) {
 
 func TestRequestRepositoryRoundTripAndConflicts(t *testing.T) {
 	pool := testPool(t)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
 	insertRequest(t, pool, "req-repo", now)
@@ -373,7 +379,6 @@ VALUES ('req-repo',0,'rc-1'),('req-repo',1,'rc-2'),('req-repo',2,'rc-1')`); err 
 
 func TestResourceRepositoryRoundTripAndLocking(t *testing.T) {
 	pool := testPool(t)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
 	insertResource(t, pool, "res-repo", now)
@@ -472,7 +477,6 @@ func TestResourceRepositoryRoundTripAndLocking(t *testing.T) {
 
 func TestAllocationRepositoryRoundTripAndUniqueActive(t *testing.T) {
 	pool := testPool(t)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
 	insertRequest(t, pool, "req-alloc", now)
@@ -554,7 +558,6 @@ VALUES ($1, $2, $3, 'completed', $4, $5, NULL, NULL, NULL, 1, $4, $4)
 
 func TestAuditWriterAndAppendOnlyTrigger(t *testing.T) {
 	pool := testPool(t)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	writer := &auditWriter{q: pool}
 	clientSeq := int64(7)
@@ -588,18 +591,109 @@ func TestAuditWriterAndAppendOnlyTrigger(t *testing.T) {
 		t.Fatalf("server_recorded_at should be database controlled, got %v", serverRecordedAt)
 	}
 
-	if _, err := pool.Exec(t.Context(), `UPDATE audit_events SET note='changed' WHERE id='ae-1'`); err == nil {
-		t.Fatalf("UPDATE audit_events expected append-only error")
+	_, err := pool.Exec(t.Context(), `UPDATE audit_events SET note='changed' WHERE id='ae-1'`)
+	assertAppendOnlySQLState(t, err, "UPDATE")
+
+	_, err = pool.Exec(t.Context(), `DELETE FROM audit_events WHERE id='ae-1'`)
+	assertAppendOnlySQLState(t, err, "DELETE")
+}
+
+// assertAppendOnlySQLState requires the specific SQLSTATE 42501 raised by
+// reject_audit_events_mutation() (migration 000006), not just any error - a
+// text match on the error message would also pass for unrelated failures
+// (e.g. a connection error) and silently stop testing the actual guarantee.
+func assertAppendOnlySQLState(t *testing.T, err error, op string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s audit_events: expected append-only error, got nil", op)
 	}
-	if _, err := pool.Exec(t.Context(), `DELETE FROM audit_events WHERE id='ae-1'`); err == nil {
-		t.Fatalf("DELETE audit_events expected append-only error")
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok {
+		t.Fatalf("%s audit_events error = %v (%T), want *pgconn.PgError", op, err, err)
+	}
+	if pgErr.Code != "42501" {
+		t.Fatalf("%s audit_events SQLSTATE = %s, want 42501 (insufficient_privilege)", op, pgErr.Code)
+	}
+}
+
+// TestAuditEventsTruncateBlockedBySQLState verifies migration 000006's statement-level
+// TRUNCATE trigger: TRUNCATE on audit_events must fail with SQLSTATE 42501, same as
+// UPDATE/DELETE, and existing rows must survive the rejected attempt.
+func TestAuditEventsTruncateBlockedBySQLState(t *testing.T) {
+	pool := testPool(t)
+	seedCoreRefs(t, pool)
+	writer := &auditWriter{q: pool}
+
+	if err := writer.Write(t.Context(), domain.AuditEvent{
+		ID:         "ae-truncate",
+		ActorID:    "dispatcher-1",
+		ActorRole:  domain.ActorRoleDispatcher,
+		EntityType: domain.EntityTypeRequest,
+		EntityID:   "x",
+		Action:     "changed",
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	_, err := pool.Exec(t.Context(), `TRUNCATE TABLE audit_events`)
+	assertAppendOnlySQLState(t, err, "TRUNCATE")
+
+	var count int
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM audit_events WHERE id='ae-truncate'`).Scan(&count); err != nil {
+		t.Fatalf("count after blocked truncate error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("row count after blocked TRUNCATE = %d, want 1 (row must survive)", count)
+	}
+}
+
+// TestAuditEventsAcceptsAdminRoleAndNewEntityTypes verifies migration 000006's widened
+// CHECK constraints: actor_role='admin' and every new entity_type value must be
+// insertable, and the pre-existing actor_role/entity_type values must remain valid.
+func TestAuditEventsAcceptsAdminRoleAndNewEntityTypes(t *testing.T) {
+	pool := testPool(t)
+	seedCoreRefs(t, pool)
+
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO users(id, role, display_name) VALUES ('admin-1', 'admin', 'Admin One')`); err != nil {
+		t.Fatalf("seed admin user error = %v", err)
+	}
+
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO audit_events(id, actor_id, actor_role, entity_type, entity_id, action)
+VALUES ('ae-admin-user', 'admin-1', 'admin', 'user', 'tech-1', 'user.create')`); err != nil {
+		t.Fatalf("insert with actor_role=admin, entity_type=user error = %v", err)
+	}
+
+	newEntityTypes := []string{
+		"user", "role", "user_role", "resource_class",
+		"resource_class_membership", "session", "auth_identity",
+	}
+	for i, entityType := range newEntityTypes {
+		id := fmt.Sprintf("ae-entity-%d", i)
+		if _, err := pool.Exec(t.Context(), `
+INSERT INTO audit_events(id, actor_id, actor_role, entity_type, entity_id, action)
+VALUES ($1, 'admin-1', 'admin', $2, 'ref-1', 'noop')`, id, entityType); err != nil {
+			t.Fatalf("insert entity_type=%s error = %v", entityType, err)
+		}
+	}
+
+	// Old actor_role/entity_type combinations must remain valid after the CHECK swap.
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO audit_events(id, actor_id, actor_role, entity_type, entity_id, action)
+VALUES ('ae-legacy-dispatcher', 'dispatcher-1', 'dispatcher', 'resource', 'res-1', 'resource.update')`); err != nil {
+		t.Fatalf("insert with legacy actor_role=dispatcher, entity_type=resource error = %v", err)
+	}
+	if _, err := pool.Exec(t.Context(), `
+INSERT INTO audit_events(id, actor_id, actor_role, entity_type, entity_id, action)
+VALUES ('ae-legacy-technician', 'tech-1', 'technician', 'request', 'req-1', 'request.create')`); err != nil {
+		t.Fatalf("insert with legacy actor_role=technician, entity_type=request error = %v", err)
 	}
 }
 
 func TestUseCaseWithPostgresUoW(t *testing.T) {
 	pool := testPool(t)
 	uow := NewUnitOfWork(pool)
-	truncateAll(t, pool)
 
 	seedCoreRefs(t, pool)
 	createdAt := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
@@ -670,7 +764,6 @@ INSERT INTO request_resource_classes(request_id, position, resource_class_id) VA
 func TestTransferResourceWithPostgres(t *testing.T) {
 	pool := testPool(t)
 	uow := NewUnitOfWork(pool)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
 
@@ -779,7 +872,6 @@ VALUES ('alloc-src', 'req-src', 'res-transfer', 'with_technician',
 // returns ErrConflict (uq_allocations_single_active_resource fires).
 func TestTransferResourceConflictNewAllocWhileOldActive(t *testing.T) {
 	pool := testPool(t)
-	truncateAll(t, pool)
 	seedCoreRefs(t, pool)
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
 

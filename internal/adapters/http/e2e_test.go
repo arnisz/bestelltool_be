@@ -18,6 +18,7 @@ import (
 	"bestelltool_be/internal/adapters/sse"
 	"bestelltool_be/internal/application/usecases"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -260,6 +261,7 @@ func e2eTestPool(t *testing.T) *pgxpool.Pool {
 		t.Skip("TEST_DATABASE_URL nicht gesetzt: E2E-Tests werden übersprungen")
 	}
 	assertTestDatabaseURL(t, dbURL)
+	resetSchema(t, dbURL)
 	if err := postgres.RunEmbeddedMigrations(t.Context(), dbURL); err != nil {
 		t.Fatalf("RunEmbeddedMigrations() error = %v", err)
 	}
@@ -268,12 +270,39 @@ func e2eTestPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("NewPool() error = %v", err)
 	}
-	truncateAll(t, pool)
 	t.Cleanup(func() {
 		pool.Close()
 	})
 
 	return pool
+}
+
+// resetSchema drops and recreates the public schema on a dedicated, short-lived
+// connection - never on the pgxpool.Pool the test itself will use.
+//
+// Why not TRUNCATE (E2): audit_events.actor_id references users(id). Migration
+// 000006 blocks UPDATE/DELETE/TRUNCATE on audit_events with a BEFORE trigger, so
+// `TRUNCATE users CASCADE` would cascade into audit_events and fail the trigger,
+// breaking test setup itself. A full schema reset sidesteps the append-only
+// guard entirely instead of trying to punch a hole in it for tests.
+//
+// Why a dedicated connection (E1): pgx v5 caches prepared statement plans and
+// type OIDs per connection. If the schema were rebuilt using a connection already
+// pooled by pgxpool, subsequent queries on that same connection can fail with
+// "cached plan must not change result type" or stale-OID errors. Resetting on a
+// throwaway connection that is closed before the pgxpool.Pool is ever created
+// avoids the problem by construction - the pool never sees a pre-reset plan.
+func resetSchema(t *testing.T, dbURL string) {
+	t.Helper()
+
+	conn, err := pgx.Connect(t.Context(), dbURL)
+	if err != nil {
+		t.Fatalf("connect for schema reset error = %v", err)
+	}
+	defer conn.Close(t.Context())
+	if _, err := conn.Exec(t.Context(), `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
+		t.Fatalf("reset schema error = %v", err)
+	}
 }
 
 func assertTestDatabaseURL(t *testing.T, dbURL string) {
@@ -290,25 +319,6 @@ func assertTestDatabaseURL(t *testing.T, dbURL string) {
 	}
 	if !strings.Contains(strings.ToLower(dbName), "test") {
 		t.Fatalf("unsichere Testdatenbank %q: Datenbankname muss klar als Testdatenbank erkennbar sein", dbName)
-	}
-}
-
-func truncateAll(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-
-	_, err := pool.Exec(t.Context(), `
-TRUNCATE TABLE
-	 audit_events,
-	 idempotency_outcomes,
-	 allocations,
-	 request_resource_classes,
-	 requests,
-	 resources,
-	 resource_classes,
-	 users
-RESTART IDENTITY CASCADE`)
-	if err != nil {
-		t.Fatalf("truncate tables error = %v", err)
 	}
 }
 

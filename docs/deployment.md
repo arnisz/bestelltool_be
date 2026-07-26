@@ -38,7 +38,13 @@ Dieses Dokument definiert verbindlich, wie eingebettete Migrationen (`RUN_MIGRAT
 - Staging/Produktion: `RUN_MIGRATIONS=false` verpflichtend, Migrationen via dediziertem Pre-Deployment-Schritt.
 - Keine automatische Ausführung von `.down.sql` durch Anwendungscode.
 
-## 6. Docker-Compose-Ableitung (Dev vs. Staging/Prod)
+## 6. Audit-Trail: Append-Only-Erzwingung (Migration 000006)
+
+- Migration `000006` erweitert `audit_events.actor_role` um `'admin'` und `entity_type` um die administrativen Werte (`user`, `role`, `user_role`, `resource_class`, `resource_class_membership`, `session`, `auth_identity`) und härtet die Append-Only-Regel: `UPDATE`, `DELETE` (`FOR EACH ROW`) und `TRUNCATE` (`FOR EACH STATEMENT`) auf `audit_events` werden per Trigger mit SQLSTATE `42501` abgewiesen (SEC-20).
+- Migration `000006` enthält zusätzlich `REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM PUBLIC`. Dieser Teil ist **ausschließlich Vorbereitung** für Phase 5 (Datenbank-Privilegien, `systemdesign.md` §13): Solange Backend, Migrationen und das .NET-Tool weiterhin dieselbe PostgreSQL-Rolle nutzen und diese Rolle Eigentümer der Tabellen ist, greift der `REVOKE` gegenüber der Anwendung **nicht** — Tabelleneigentümer sind von `REVOKE ... FROM PUBLIC` nicht betroffen.
+- Wirksamer Schutz vor versehentlichem `UPDATE`/`DELETE`/`TRUNCATE` durch die Anwendung selbst entsteht erst mit der Rollentrennung in Phase 5 (`app_backend` ohne `UPDATE`/`DELETE`/`TRUNCATE`-Grant auf `audit_events`, separate `app_migrator`-Rolle für DDL). Bis dahin ist der Append-Only-Schutz **ausschließlich der Trigger** — der `REVOKE`-Teil darf nicht als bereits wirksame Zugriffskontrolle missverstanden werden (keine Scheinsicherheit).
+
+## 7. Docker-Compose-Ableitung (Dev vs. Staging/Prod)
 
 - `compose.yml` im Repository ist **explizit ein Dev-Compose**:
   - Backend läuft mit `APP_ENV=dev` und `RUN_MIGRATIONS=true`.
