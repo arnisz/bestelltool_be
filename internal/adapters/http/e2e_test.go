@@ -350,8 +350,8 @@ VALUES ($1, 'tech-b', 'open', 'executable', '', 'ctx-e2e-b', 'E2E B', NULL, NULL
 	}
 
 	if _, err := q.Exec(t.Context(), `
-INSERT INTO request_resource_classes(request_id, resource_class_id)
-VALUES ($1, 'rc-1')
+INSERT INTO request_resource_classes(request_id, position, resource_class_id)
+VALUES ($1, 0, 'rc-1')
 `, targetRequestID); err != nil {
 		t.Fatalf("insert target request_resource_class %s error = %v", targetRequestID, err)
 	}

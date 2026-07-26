@@ -1,9 +1,7 @@
 # Project Status: Resource Planning System (Go Backend)
 
 ## 🎯 Current Focus
-Dockerfile und `compose.yml` für das Backend und die PostgreSQL-Datenbank erstellen (Grundlage für das künftige Deployment und für reproduzierbare Integrationstests).
-
-Direkt danach beginnt **Phase 1 der Benutzerverwaltung**: die Audit-Erweiterung um die Rolle `admin` und administrative Entity-Typen. Ohne diese Migration kann keine administrative Aktion revisionssicher protokolliert werden — sie ist deshalb die erste fachliche Änderung des neuen Bereichs, nicht die Oberfläche.
+**Phase 1, Punkt 2:** Migration `000006` vorbereiten und umsetzen: `audit_events.actor_role` um `admin` erweitern sowie administrative `entity_type`-Werte ergänzen. Das ist die erste fachliche Änderung für die Benutzerverwaltung, weil ohne diese Audit-Erweiterung keine administrative Aktion revisionssicher protokolliert werden kann.
 
 ## ⚙️ Server-Konfiguration (Umgebungsvariablen)
 
@@ -12,6 +10,7 @@ Direkt danach beginnt **Phase 1 der Benutzerverwaltung**: die Audit-Erweiterung 
 | Variable | Required | Default | Beschreibung |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | ✅ | — | PostgreSQL Connection String |
+| `APP_ENV` | ✅ | — | `dev` / `staging` / `prod`; steuert die Zulässigkeit von `AUTH_STATIC_TOKENS` |
 | `AUTH_STATIC_TOKENS` | nur `dev` | — | Statische Bearer-Token (`token:user-id:role,...`) — Übergangslösung, ab Phase 2 nur noch bei `APP_ENV=dev` zulässig (SEC-26) |
 | `RUN_MIGRATIONS` | ❌ | `false` | Führt beim Serverstart eingebettete Up-Migrationen aus (`true`/`1`) |
 | `HTTP_ADDR` | ❌ | `:8080` | HTTP Listen-Adresse |
@@ -24,7 +23,6 @@ Direkt danach beginnt **Phase 1 der Benutzerverwaltung**: die Audit-Erweiterung 
 
 | Variable | Required | Default | Beschreibung |
 |----------|----------|---------|-------------|
-| `APP_ENV` | ✅ | — | `dev` / `staging` / `prod`; steuert die Zulässigkeit von `AUTH_STATIC_TOKENS` |
 | `AUTH_MODE` | ❌ | `session` | `session` (Login/Refresh) oder `static` (nur `dev`) |
 | `ACCESS_TOKEN_TTL` | ❌ | `15m` | Lebensdauer des Access-Tokens |
 | `REFRESH_TOKEN_TTL` | ❌ | `720h` | Lebensdauer des Refresh-Tokens (30 d, muss die Offline-Phase der Techniker abdecken) |
@@ -94,17 +92,23 @@ Direkt danach beginnt **Phase 1 der Benutzerverwaltung**: die Audit-Erweiterung 
 - [x] SSE-Adapter vorbereitet: neuer Event-Port (`internal/application/ports/event.go`), in-memory SSE-Broker (`internal/adapters/sse`), geschützter Stream-Endpunkt `GET /api/v1/events` mit Rollenfilter (Dispatcher: alle Events, Techniker: nur eigene). Schreibende Use Cases publizieren typisierte Events; Composition Root verdrahtet Publisher + Stream. Unit-Tests für Broker/Handler ergänzt.
 - [x] SSE-Handshake gehärtet: `GET /api/v1/events` flush't jetzt direkt nach dem Schreiben der SSE-Header (vor `Subscribe`), damit Clients die Verbindung sofort erkennen, auch wenn das Stream-Backend beim Subscriben kurz blockiert. Regressionstest `TestHandleEventsFlushesBeforeSubscribeReturns` ergänzt.
 - [x] Fachentscheidung finalisiert und dokumentiert: Direct Transfers und operative Ressourcenallokationen liegen ausschließlich beim Dispatcher; Techniker-zu-Techniker-Transfer ist ausgeschlossen (`systemdesign.md`).
-- [x] End-to-End-Test ergänzt: `TestResourceLifecycleE2E` verifiziert den vollständigen HTTP→UseCase→Repository→PostgreSQL-Durchstich über `httptest.Server` inkl. Rollen-Negativfall `403` für Techniker-Direct-Transfer (`internal/adapters/http/e2e_test.go`, Skip ohne `TEST_DATABASE_URL`).
+- [x] End-to-End-Test ergänzt: `TestResourceLifecycleE2E` verifiziert den vollständigen HTTP→UseCase→Repository→PostgreSQL-Durchstich über `httptest.Server` inkl. Rollen-Negativfall `403` für Techniker-Direct-Transfer (`internal/adapters/http/e2e_test.go`, Skip ohne `TEST_DATABASE_URL`); die Vorbedingungen für Schritt C werden dabei aktuell per Roh-SQL-Fixture gesetzt (nicht über den Produktivpfad).
 - [x] Migrations-Runner für den Serverstart implementiert: SQL-Migrationen via `go:embed` ins Binary eingebettet; zentraler Runner im Postgres-Adapter; optionaler Startup-Lauf über `RUN_MIGRATIONS` mit fail-fast bei Fehler.
 - [x] Deployment-Strategie für automatische Migrationen beim Serverstart dokumentiert (`docs/deployment.md`): klare Umgebungsregeln für `RUN_MIGRATIONS`, Multi-Instanz-Empfehlung (`RUN_MIGRATIONS=false` in Staging/Prod), dedizierter Pre-Deployment-Migrationsschritt und manuelle Rollback-Policy für Down-Migrationen.
 - [x] **Architektur um Identity-, Autorisierungs- und Benutzerverwaltungsmodell erweitert** (`systemdesign.md`, Abschnitte 5–13): Datenmodell (`users`, `auth_identities`, `roles`, `permissions`, `role_permissions`, `user_roles`, `sessions`, `refresh_tokens`), Berechtigungsmodell mit Deny-by-Default, Session-/Token-Konzept mit Rotation und Replay-Erkennung, `active_role` bei Mehrfachrollen, Audit-Erweiterung, Datenschutz-/Aufbewahrungsvorgaben, numerierte Sicherheitsanforderungen `SEC-01`–`SEC-27`, offene Entscheidungen `D-1`–`D-5` und Migrationsphasen.
+- [x] **Phase 0 Deployment-Nachweise erbracht**: `compose.yaml` validiert, Backend-Container gestartet, `/healthz` liefert `200`, Migrationen beim Containerstart nachgewiesen (`RUN_MIGRATIONS=true`) und Container läuft als `65532:65532`; Image-Inspektion ohne eingebettete `AUTH_STATIC_TOKENS`.
+- [x] **SEC-26 im Container negativ nachgewiesen**: `APP_ENV=prod` mit gesetztem `AUTH_STATIC_TOKENS` führt zu fatalem Startup-Abbruch.
+- [x] **B5-Nachweis gegen leere Testdatenbank erbracht**: `emptydb.bat` + `go test -count=1 -p 1 ./...` mit gesetzter `TEST_DATABASE_URL` grün; Migrationsanwendung erfolgt in `testPool`/`e2eTestPool` via `RunEmbeddedMigrations` (kein `TestMain` nötig).
 
 ## ⏭️ Next Steps (in order)
 
 ### Phase 0 — Deployment-Grundlage
-1. [ ] Dockerfile (Multi-Stage, non-root User, `CGO_ENABLED=0`) und `compose.yml` für Backend + PostgreSQL erstellen. Secrets nicht ins Image; `AUTH_STATIC_TOKENS` nur im dev-Compose.
+1. [x] Dockerfile (Multi-Stage, non-root User, `CGO_ENABLED=0`) und `compose.yaml` für Backend + PostgreSQL erstellt und verifiziert. Secrets nicht im Image; `AUTH_STATIC_TOKENS` nur zur Laufzeit im dev-Compose. Ein Container-`HEALTHCHECK` ist bewusst noch offen (Distroless ohne Shell/curl/wget; eigenes Binary wäre nötig, `/healthz` ist extern prüfbar).
+   - [x] 1c umgesetzt: Integrations-/E2E-Tests wenden Embedded Up-Migrationen beim Teststart über `RunEmbeddedMigrations` in `testPool`/`e2eTestPool` auf `TEST_DATABASE_URL` an (ohne Refactoring auf `TestMain`).
+   - [x] 1d (ehemals Punkt 15) umgesetzt: `AUTH_STATIC_TOKENS` ist nur bei `APP_ENV=dev` zulässig; bei anderem `APP_ENV` bricht der Startup mit Fehler ab (SEC-26).
 
 ### Phase 1 — Audit-Fundament (Voraussetzung für alles Administrative)
+- [ ] Tech Debt vor `000006`: `seedDirectTransferPreconditions` in `internal/adapters/http/e2e_test.go` seedet `requests`, `request_resource_classes`, `resources` und `allocations` per Roh-SQL und hält damit eine zweite, ungepflegte Kopie des Schemas. Der `23502`-Fund auf `request_resource_classes.position` war die Folge. Ersetzen durch Seeding über Repositories/Use Cases innerhalb einer UnitOfWork (HTTP-Endpunkt für reguläre Zuweisung fehlt, Use Case existiert).
 2. [ ] Migration `000006`: `audit_events.actor_role` CHECK um `'admin'` erweitern; `entity_type` um `user`, `role`, `user_role`, `resource_class`, `resource_class_membership`, `session`, `auth_identity` erweitern. Kein Foreign Key auf `roles(code)` (Audit muss von Stammdaten unabhängig bleiben, SEC-20-Begründung in `systemdesign.md` §8.1).
 3. [ ] Append-Only technisch erzwingen (SEC-20): `REVOKE UPDATE, DELETE ON audit_events` für die Anwendungsrolle **plus** `BEFORE UPDATE OR DELETE`-Trigger mit `RAISE EXCEPTION`. Integrationstest, der ein `UPDATE`/`DELETE` versucht und den Fehler erwartet.
 4. [ ] Aktions-Taxonomie im Code als Konstanten festschreiben (`user.create`, `role.assign`, `session.revoke`, `session.replay_detected`, `auth.login_failed`, …) statt freier Strings.
@@ -120,8 +124,6 @@ Direkt danach beginnt **Phase 1 der Benutzerverwaltung**: die Audit-Erweiterung 
 12. [ ] `SessionAuthenticator` als neuer `ports.Authenticator`; Principal-Cache mit harter TTL (SEC-11).
 13. [ ] Drosselung für `login`/`refresh` pro Konto und pro Quell-IP, `429` + `Retry-After` in `mapHTTPError` ergänzen (SEC-05). IP-Ermittlung nur über Proxy-Header, wenn `TRUST_PROXY_HEADERS=true`.
 14. [ ] Timing-Gleichheit bei unbekanntem Benutzer: Dummy-Argon2id-Verifikation, einheitliche Fehlermeldung (SEC-03). Test, der die drei Fehlerfälle auf identische Response prüft.
-15. [ ] `AUTH_STATIC_TOKENS` nur noch bei `APP_ENV=dev` zulassen, sonst Startup-Fehler (SEC-26).
-
 ### Phase 3 — Rollen & Berechtigungen
 16. [ ] Migration `000009`: `roles`, `permissions`, `role_permissions`, `user_roles` (inkl. `CHECK (assigned_by <> user_id)`) anlegen; Katalog aus `systemdesign.md` §6.2 seeden; `system.is_assignable = false`.
 17. [ ] Migration `000010`: `user_roles` aus `users.role` backfillen.
@@ -162,6 +164,7 @@ Direkt danach beginnt **Phase 1 der Benutzerverwaltung**: die Audit-Erweiterung 
 - Administrative Berechtigungen implizieren niemals operative (SEC-15).
 
 ## ⚠️ Known Issues / Tech Debt
+- **SQL-Fixture-Drift im E2E-Setup**: `seedDirectTransferPreconditions` in `internal/adapters/http/e2e_test.go` seedet operative Tabellen (`requests`, `request_resource_classes`, `resources`, `allocations`) per Roh-SQL und dupliziert damit Schemawissen außerhalb der Repositories/Use Cases. Der aufgetretene `SQLSTATE 23502` bei `request_resource_classes.position` war eine direkte Folge. Folgeaufgabe: Seeding auf Repository-/Use-Case-Pfad innerhalb einer UnitOfWork umstellen.
 - **StaticTokenAuthenticator** (`internal/adapters/auth`) ist eine Übergangslösung. Tokens stehen im Klartext in `AUTH_STATIC_TOKENS`. Ablösung in Phase 2; danach nur noch bei `APP_ENV=dev` zulässig und in Phase 3 vollständig entfernen.
 - **Audit-Schema unvollständig**: `actor_role` kennt `admin` nicht, `entity_type` kennt keine administrativen Typen. Bis Migration `000006` können administrative Aktionen nicht protokolliert werden — daher dürfen vorher **keine** Admin-Endpunkte ausgeliefert werden.
 - **Audit-Unveränderlichkeit ist bisher nur eine Design-Zusage**, technisch noch nicht erzwungen (kein `REVOKE`, kein Trigger).
