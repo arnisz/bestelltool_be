@@ -691,6 +691,47 @@ the admin endpoints exist, and then goes through the API.
 Medium term the reference maintenance should also move to the API so that all
 writes are audited through one path.
 
+### 10.3 Client Reconciliation (Offline Recovery)
+
+SSE (Section 10, `GET /api/v1/events`) is a best-effort push channel, not a
+source of truth. A dropped connection, a full subscriber buffer, or a period
+spent entirely offline (Section 4) can all cause a technician to miss events
+silently. The client MUST NOT treat SSE delivery as a guarantee; it is a
+convenience for immediate updates while online, not the mechanism a client
+relies on to discover state changes made in its absence.
+
+The gap this closes: after an offline period, a technician's client cannot
+know which new requests, allocations, or status changes occurred, because it
+has no advance knowledge of IDs it was never told about (e.g. a dispatcher
+assigned a new allocation to this technician while they were offline). Without
+a reconciliation endpoint, there is no way to discover them.
+
+**Endpoint:**
+
+```text
+GET /api/v1/me/relevant-changes?since=<RFC3339 timestamp>   authenticated (self-service, object-scoped to caller)
+```
+
+- Returns requests and allocations relevant to the calling Principal, scoped
+  by their own identity (`TechnicianID` for a technician), never by a
+  client-supplied filter (SEC-01 pattern: the caller's identity comes from
+  the Principal, `since` is the only client input).
+- `since` omitted → full snapshot of currently relevant, non-terminal items
+  (bounded by an open decision below on what counts as "relevant").
+- `since` present → only items whose `updated_at` is after that timestamp
+  (incremental sync), matching the polling-after-reconnect pattern the
+  offline client already needs for its outbox replay (Section 4).
+- Response carries the server's own `now` (or the latest `updated_at` seen)
+  so the client can use it as the next `since` value without relying on
+  client-side clock drift.
+
+This endpoint is deliberately technician-focused. A dispatcher's equivalent
+need (an operational overview of all active items) is a separate concern —
+they already have broader read access (D-3) and a standing dashboard is a
+different UX pattern than offline reconciliation. Whether dispatchers need a
+parallel reconciliation endpoint, or whether their existing list/detail
+access already suffices, is unresolved (see D-12).
+
 ---
 
 ## 11. Security Requirements (testable)
@@ -749,6 +790,7 @@ writes are audited through one path.
 | **D-9** | `allocation.return_request` ist bewusst nicht objektgebunden: jeder Actor mit dieser Permission darf die Rückgabe JEDER Allocation anstoßen, unabhängig davon, wer sie hält. Dies ist eine gewollte fachliche Entscheidung (Depot-/Werkstatt-Rückgabe durch einen Kollegen), keine Sicherheitslücke. §6.4 ("Object-Level-Checks stay in the use case") gilt hier explizit NICHT für die Rückgabeanforderung — der Objekt-Level-Check gilt weiterhin für andere Operationen wo Halterschaft tatsächlich relevant ist (z. B. eine künftige Direktanfrage nur für die eigene, aktive Allocation). | entschieden (2026-07-26) |
 | **D-10** | On-behalf-of request creation: `POST /api/v1/requests` bindet `TechnicianID` seit der SEC-01-Konsistenzkorrektur zwingend an den authentifizierten Principal — ein Techniker kann nur für sich selbst anfragen, niemals für einen anderen (bewusste Entscheidung, Impersonation-Schutz). Ein legitimer künftiger Bedarf ist denkbar: ein Dispatcher legt eine Anfrage stellvertretend für einen Techniker ohne Konnektivität an. Sollte das gebraucht werden, MUSS es ein separater, eigens berechtigter Pfad sein — z. B. eine eigene Permission `request.create_on_behalf` mit einem eigenen Use Case, der sowohl den wahren Actor als auch den Zielnutzer im Audit-Event festhält (`actor_id` ≠ `technician_id`, beide sichtbar) — nicht eine Lockerung der bestehenden Route oder ein client-gesetztes `technician_id`-Feld im normalen Endpunkt. Kein aktueller Bedarf, keine Implementierung vorgesehen. | deferred, kein aktueller Bedarf |
 | **D-11** | Die öffentliche `<id>` in Access-Tokens (`rp_at_<id>.<secret>`) entspricht keinem Lookup-Schlüssel — der Authenticator sucht ausschließlich über den Secret-Hash, ignoriert die ID vollständig. Funktioniert korrekt, widerspricht aber dem dokumentierten Tokenmodell ("public and indexed"). Kein aktives Risiko, da nie als Lookup verwendet. Fix würde `session_authenticator.go` auf ID-basiertes `GetByID` + konstantzeitlichen Hash-Vergleich umstellen — zurückgestellt, um nicht mit den kritischeren Race-Fixes zu kollidieren. | deferred |
+| **D-12** | Reconciliation-Endpunkt (§10.3): mehrere Detailfragen offen. (a) Was zählt als "relevant" für einen Snapshot ohne `since` — nur nicht-terminale Requests/Allocations, oder auch kürzlich abgeschlossene/stornierte innerhalb eines Zeitfensters, damit ein Client sieht, dass eine ihm bekannte Anfrage inzwischen erledigt wurde? (b) Liefert der Endpunkt Requests und Allocations kombiniert in einer Antwort, oder als zwei getrennte Endpunkte? (c) Braucht ein Dispatcher ein eigenes Äquivalent, oder deckt die bestehende Liste/Detail-Zugriffsstruktur (D-3) das schon ab? (d) Gibt es eine Obergrenze für die Antwortgröße bei einem sehr lange offline gewesenen Client (z. B. Pagination), oder ist das bei ~150 Technikern mit überschaubarem individuellem Volumen praktisch irrelevant? | open |
 
 ---
 
