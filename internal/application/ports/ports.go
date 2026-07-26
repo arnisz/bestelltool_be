@@ -20,6 +20,7 @@ type Authenticator interface {
 // UserRepository provides persistence access for users.
 type UserRepository interface {
 	GetByID(ctx context.Context, id domain.UserID) (*domain.User, error)
+	GetByUsername(ctx context.Context, username string) (*domain.User, error)
 	Create(ctx context.Context, u *domain.User) error
 }
 
@@ -80,6 +81,9 @@ type Transaction interface {
 	Allocations() AllocationRepository
 	Audits() AuditWriter
 	Idempotency() IdempotencyStore
+	AuthIdentities() AuthIdentityRepository
+	Sessions() SessionRepository
+	RefreshTokens() RefreshTokenRepository
 }
 
 // UnitOfWork executes a function atomically inside one transaction.

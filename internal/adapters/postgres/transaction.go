@@ -55,6 +55,18 @@ func (t *txAdapter) Idempotency() ports.IdempotencyStore {
 	return &idempotencyStore{q: t.state.q}
 }
 
+func (t *txAdapter) AuthIdentities() ports.AuthIdentityRepository {
+	return &authIdentityRepository{q: t.state.q}
+}
+
+func (t *txAdapter) Sessions() ports.SessionRepository {
+	return &sessionRepository{q: t.state.q}
+}
+
+func (t *txAdapter) RefreshTokens() ports.RefreshTokenRepository {
+	return &refreshTokenRepository{q: t.state.q}
+}
+
 type UnitOfWork struct {
 	pool *pgxpool.Pool
 }

@@ -60,6 +60,9 @@ func (t *fakeTx) Resources() ports.ResourceRepository            { return t.reso
 func (t *fakeTx) Allocations() ports.AllocationRepository        { return t.allocations }
 func (t *fakeTx) Audits() ports.AuditWriter                      { return t.audits }
 func (t *fakeTx) Idempotency() ports.IdempotencyStore            { return nil }
+func (t *fakeTx) AuthIdentities() ports.AuthIdentityRepository   { return nil }
+func (t *fakeTx) Sessions() ports.SessionRepository              { return nil }
+func (t *fakeTx) RefreshTokens() ports.RefreshTokenRepository    { return nil }
 
 type fakeAllocationRepo struct {
 	items        map[domain.AllocationID]*domain.Allocation
@@ -166,6 +169,15 @@ type fakeUserRepo struct {
 
 func (r *fakeUserRepo) GetByID(_ context.Context, id domain.UserID) (*domain.User, error) {
 	return r.items[id], nil
+}
+
+func (r *fakeUserRepo) GetByUsername(_ context.Context, username string) (*domain.User, error) {
+	for _, u := range r.items {
+		if u.Username == username {
+			return u, nil
+		}
+	}
+	return nil, ports.ErrNotFound
 }
 
 func (r *fakeUserRepo) Create(_ context.Context, u *domain.User) error {

@@ -37,6 +37,32 @@ WHERE id = $1`, string(id))
 	return &u, nil
 }
 
+func (r *userRepository) GetByUsername(ctx context.Context, username string) (*domain.User, error) {
+	row := r.q.QueryRow(ctx, `
+SELECT id, username, role, display_name, email, is_active, version, created_at, updated_at
+FROM users
+WHERE username = $1`, username)
+
+	var u domain.User
+	var email *string
+	if err := row.Scan(
+		&u.ID,
+		&u.Username,
+		&u.Role,
+		&u.DisplayName,
+		&email,
+		&u.IsActive,
+		&u.Version,
+		&u.CreatedAt,
+		&u.UpdatedAt,
+	); err != nil {
+		return nil, mapReadError("user", err)
+	}
+	u.Email = email
+
+	return &u, nil
+}
+
 // Create inserts a new user. Returns ErrConflict if the id or username
 // already exists (uq_users_username, migration 000007).
 func (r *userRepository) Create(ctx context.Context, u *domain.User) error {

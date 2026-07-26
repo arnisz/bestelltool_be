@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/signal"
 	"syscall"
+	"time"
 
 	authadapter "bestelltool_be/internal/adapters/auth"
 	httpadapter "bestelltool_be/internal/adapters/http"
@@ -16,6 +17,12 @@ import (
 	"bestelltool_be/internal/adapters/sse"
 	"bestelltool_be/internal/application/usecases"
 )
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time {
+	return time.Now()
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -49,16 +56,20 @@ func run() error {
 	}
 
 	uow := postgres.NewUnitOfWork(pool)
+	passwordHasher := authadapter.NewArgon2Hasher(authadapter.DefaultArgon2Config())
+	secretGenerator := authadapter.NewSecretGenerator(authadapter.DefaultTokenConfig())
+	loginUseCase := usecases.NewLoginUseCase(uow, passwordHasher, secretGenerator, systemClock{})
 	requestRepo := postgres.NewRequestRepository(pool)
 	eventStream := sse.NewBroker(0)
 
-	handler := httpadapter.NewHandlerWithEventStream(
+	handler := httpadapter.NewHandlerWithEventStreamAndLogin(
 		authenticator,
 		usecases.NewCreateRequestUseCaseWithPublisher(uow, eventStream),
 		usecases.NewGetRequestUseCase(requestRepo),
 		usecases.NewRequestReturnUseCaseWithPublisher(uow, eventStream),
 		usecases.NewTransferResourceUseCaseWithPublisher(uow, eventStream),
 		eventStream,
+		loginUseCase,
 	)
 
 	srv := &http.Server{

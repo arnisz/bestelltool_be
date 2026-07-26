@@ -20,6 +20,11 @@ type Authenticator interface {
 	Authenticate(ctx context.Context, token string) (*ports.Principal, error)
 }
 
+// LoginUseCase is the inbound port for user login.
+type LoginUseCase interface {
+	Execute(ctx context.Context, in usecases.LoginInput) (*usecases.LoginOutput, error)
+}
+
 // CreateRequestUseCase is the inbound port for creating requests.
 type CreateRequestUseCase interface {
 	Execute(ctx context.Context, in usecases.CreateRequestInput) (*domain.Request, error)
@@ -57,6 +62,7 @@ func PrincipalFromContext(ctx context.Context) (*ports.Principal, bool) {
 }
 
 type handler struct {
+	login            LoginUseCase
 	createRequest    CreateRequestUseCase
 	getRequest       GetRequestUseCase
 	requestReturn    RequestReturnUseCase
@@ -157,6 +163,20 @@ func NewHandlerWithEventStream(
 	return NewHandlerWithEventStreamAndClock(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now)
 }
 
+// NewHandlerWithEventStreamAndLogin builds the HTTP adapter, wires SSE
+// streaming and registers the public login route.
+func NewHandlerWithEventStreamAndLogin(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	eventStream EventStream,
+	login LoginUseCase,
+) http.Handler {
+	return NewHandlerWithEventStreamAndClockAndLogin(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now, login)
+}
+
 // NewHandlerWithClock builds the HTTP adapter and allows deterministic tests.
 // All /api/v1/* routes are protected by the auth middleware followed by per-route
 // role checks via requireRoles. Unprotected routes (e.g. GET /health) must be
@@ -182,11 +202,27 @@ func NewHandlerWithEventStreamAndClock(
 	eventStream EventStream,
 	now func() time.Time,
 ) http.Handler {
+	return NewHandlerWithEventStreamAndClockAndLogin(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, now, nil)
+}
+
+// NewHandlerWithEventStreamAndClockAndLogin builds the HTTP adapter, allows
+// deterministic tests and wires the public login route.
+func NewHandlerWithEventStreamAndClockAndLogin(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	eventStream EventStream,
+	now func() time.Time,
+	login LoginUseCase,
+) http.Handler {
 	if now == nil {
 		now = time.Now
 	}
 
 	h := &handler{
+		login:            login,
 		createRequest:    createRequest,
 		getRequest:       getRequest,
 		requestReturn:    requestReturn,
@@ -219,8 +255,10 @@ func NewHandlerWithEventStreamAndClock(
 			http.HandlerFunc(h.handleEvents),
 		))
 
-	// Outer mux: public routes live directly on this mux; /api/v1/ stays auth-guarded.
+	// Outer mux: public routes live directly on this mux; /api/v1/ stays
+	// auth-guarded except explicit public endpoints.
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/login", h.handleLogin)
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.Handle("/api/v1/", authMiddleware(auth, protected))
 
