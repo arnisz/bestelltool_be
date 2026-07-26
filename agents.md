@@ -200,8 +200,12 @@ go test -count=1 ./...
 ### Integration Tests
 PostgreSQL integration tests in `internal/adapters/postgres/` are **skipped automatically** when the `TEST_DATABASE_URL` environment variable is not set. To run them against a real database:
 ```sh
-TEST_DATABASE_URL="postgres://user:pass@host/dbname" go test -count=1 ./internal/adapters/postgres/...
+TEST_DATABASE_URL="postgres://user:pass@host/dbname" go test -count=1 -p 1 ./internal/adapters/postgres/...
 ```
+
+Use `-p 1` here because the postgres and http packages otherwise access the same test database in parallel.
+
+Open question (do not implement in this step): should integration tests use schema isolation per package so they can safely run in parallel again?
 
 At the end of every phase, run the integration tests against the real test database. Green skips are not sufficient once the environment is available.
 

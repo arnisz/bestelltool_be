@@ -108,12 +108,12 @@
    - [x] 1d (ehemals Punkt 15) umgesetzt: `AUTH_STATIC_TOKENS` ist nur bei `APP_ENV=dev` zulässig; bei anderem `APP_ENV` bricht der Startup mit Fehler ab (SEC-26).
 
 ### Phase 1 — Audit-Fundament (Voraussetzung für alles Administrative)
-- [ ] Tech Debt vor `000006`: `seedDirectTransferPreconditions` in `internal/adapters/http/e2e_test.go` seedet `requests`, `request_resource_classes`, `resources` und `allocations` per Roh-SQL und hält damit eine zweite, ungepflegte Kopie des Schemas. Der `23502`-Fund auf `request_resource_classes.position` war die Folge. Ersetzen durch Seeding über Repositories/Use Cases innerhalb einer UnitOfWork (HTTP-Endpunkt für reguläre Zuweisung fehlt, Use Case existiert).
 2. [ ] Migration `000006`: `audit_events.actor_role` CHECK um `'admin'` erweitern; `entity_type` um `user`, `role`, `user_role`, `resource_class`, `resource_class_membership`, `session`, `auth_identity` erweitern. Kein Foreign Key auf `roles(code)` (Audit muss von Stammdaten unabhängig bleiben, SEC-20-Begründung in `systemdesign.md` §8.1).
 3. [ ] Append-Only technisch erzwingen (SEC-20): `REVOKE UPDATE, DELETE ON audit_events` für die Anwendungsrolle **plus** `BEFORE UPDATE OR DELETE`-Trigger mit `RAISE EXCEPTION`. Integrationstest, der ein `UPDATE`/`DELETE` versucht und den Fehler erwartet.
 4. [ ] Aktions-Taxonomie im Code als Konstanten festschreiben (`user.create`, `role.assign`, `session.revoke`, `session.replay_detected`, `auth.login_failed`, …) statt freier Strings.
 
 ### Phase 2 — Auth-Kern (löst `AUTH_STATIC_TOKENS` ab)
+- [ ] Tech Debt vor Phase 2, Punkt 5: `seedDirectTransferPreconditions` in `internal/adapters/http/e2e_test.go` und `scripts/dev-seed.sql` enthalten handgeschriebenes Schemawissen (zweite/dritte Kopie außerhalb der Repositories/Use Cases). Spätestens mit `users.username` (`NOT NULL` + `UNIQUE`) in Phase 2, Punkt 5 droht erneuter Drift/Bruch. Vorher auf Seeding über Repositories/Use Cases innerhalb einer UnitOfWork umstellen.
 5. [ ] Migration `000007`: `users` um `username` (Backfill → `NOT NULL` → `UNIQUE`), `email`, `version`, `created_at`, `updated_at` erweitern. `users.role` bleibt vorerst bestehen (Expand/Contract).
 6. [ ] Migration `000008`: `auth_identities`, `sessions`, `refresh_tokens` inkl. Indizes anlegen.
 7. [ ] Ports ergänzen: `UserRepository`, `AuthIdentityRepository`, `SessionRepository`, `RefreshTokenRepository`, `PasswordHasher`, `SecretGenerator`, `Clock`.
@@ -164,7 +164,8 @@
 - Administrative Berechtigungen implizieren niemals operative (SEC-15).
 
 ## ⚠️ Known Issues / Tech Debt
-- **SQL-Fixture-Drift im E2E-Setup**: `seedDirectTransferPreconditions` in `internal/adapters/http/e2e_test.go` seedet operative Tabellen (`requests`, `request_resource_classes`, `resources`, `allocations`) per Roh-SQL und dupliziert damit Schemawissen außerhalb der Repositories/Use Cases. Der aufgetretene `SQLSTATE 23502` bei `request_resource_classes.position` war eine direkte Folge. Folgeaufgabe: Seeding auf Repository-/Use-Case-Pfad innerhalb einer UnitOfWork umstellen.
+- **Fehlender Startup-Konfigurationsbeleg im Container-Log**: `docker compose logs backend` ist beim Start leer; der Server schreibt keine Startzeile mit aufgelöster Konfiguration (`APP_ENV`, `HTTP_ADDR`, `RUN_MIGRATIONS`, Anzahl angewendeter Migrationen). Ohne diesen Logeintrag fehlt im Deployment ein Nachweis, mit welcher Konfiguration eine Instanz läuft. Umsetzung nur ohne Secrets in Logs (SEC-06).
+- **SQL-Fixture-Drift im E2E- und Dev-Seed-Setup**: `seedDirectTransferPreconditions` in `internal/adapters/http/e2e_test.go` und `scripts/dev-seed.sql` enthalten handgeschriebenes Schemawissen außerhalb der Repositories/Use Cases (zweite/dritte Kopie). Der aufgetretene `SQLSTATE 23502` bei `request_resource_classes.position` war eine direkte Folge. Der nächste kritische Driftpunkt liegt in Phase 2, Punkt 5 (`users.username` als `NOT NULL` + `UNIQUE`). Folgeaufgabe: Seeding auf Repository-/Use-Case-Pfad innerhalb einer UnitOfWork umstellen.
 - **StaticTokenAuthenticator** (`internal/adapters/auth`) ist eine Übergangslösung. Tokens stehen im Klartext in `AUTH_STATIC_TOKENS`. Ablösung in Phase 2; danach nur noch bei `APP_ENV=dev` zulässig und in Phase 3 vollständig entfernen.
 - **Audit-Schema unvollständig**: `actor_role` kennt `admin` nicht, `entity_type` kennt keine administrativen Typen. Bis Migration `000006` können administrative Aktionen nicht protokolliert werden — daher dürfen vorher **keine** Admin-Endpunkte ausgeliefert werden.
 - **Audit-Unveränderlichkeit ist bisher nur eine Design-Zusage**, technisch noch nicht erzwungen (kein `REVOKE`, kein Trigger).
