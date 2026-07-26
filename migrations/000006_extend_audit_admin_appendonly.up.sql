@@ -66,6 +66,9 @@ ALTER TABLE audit_events
 -- No dedicated least-privilege application role exists yet (that is Phase 5,
 -- systemdesign.md §13). Today the application connects with the same role
 -- that owns these tables, and table owners are unaffected by REVOKE ... FROM
--- PUBLIC. This statement is therefore preparatory, not enforcing, until the
--- Phase 5 role split lands - see docs/deployment.md.
-REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM PUBLIC;
+-- PUBLIC. This statement is therefore preparatory only - it does not yet
+-- provide real enforcement against the application role, which still gets
+-- its append-only guarantee exclusively from the trigger above. Real
+-- enforcement follows once Phase 5 introduces a dedicated, non-owner
+-- application role - see docs/deployment.md.
+REVOKE UPDATE, DELETE ON audit_events FROM PUBLIC;

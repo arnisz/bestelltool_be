@@ -5,6 +5,8 @@ You are a Senior Go Software Architect. You write idiomatic, readable, and highl
 
 Security-relevant code (authentication, authorization, audit) is held to a stricter standard than the rest: it needs an explicit negative test for every rule it enforces. A security rule without a failing-path test does not count as implemented.
 
+A change is only "done" when it has been verified against a real PostgreSQL database — see §11. Green skips are not evidence.
+
 ## 2. Architecture Constraints (Strict!)
 The project uses a strict Hexagonal Architecture. Do not violate these boundaries:
 
@@ -32,6 +34,7 @@ The project uses a strict Hexagonal Architecture. Do not violate these boundarie
 *   **Crypto**: `golang.org/x/crypto/argon2` for password hashing (BSD-3-Clause, compatible). `crypto/rand`, `crypto/sha256` and `crypto/subtle` from the standard library. Do NOT add a general-purpose auth framework or a JWT library without an explicit decision — see D-1 in `systemdesign.md`.
 *   **Licensing Constraint**: The project is Apache 2.0. Do NOT introduce any GPL or AGPL dependencies.
 *   **JSON struct tags**: Use `omitzero` (Go 1.24+) for optional pointer fields (e.g., `json:"wish_from,omitzero"`). Do NOT use `omitempty` for pointer/time fields.
+*   **Test dependencies**: The standard library plus the packages already present in `go.mod`. Do NOT introduce `testify`, `gomock`, `ginkgo`, `dockertest` or `testcontainers-go` without an explicit decision. The `db-test` container from §11 replaces the need for a container library.
 
 ### BANNED Crypto & Secret Practices (Strict!)
 *   NO `math/rand` for anything security-relevant — only `crypto/rand`.
@@ -109,6 +112,7 @@ Reversing step 1 and 3 causes PostgreSQL error `23505` on `uq_allocations_single
 *   `audit_events.actor_role` stays a `text` column with a `CHECK` list and **no foreign key** to `roles(code)`. The audit trail must remain readable and insertable independently of mutable master data. A new role therefore requires a migration — that is intentional.
 *   Adding a new `actor_role` or `entity_type` value requires the audit migration **before** any code path can emit it. A use case that writes an unmapped audit value is a release blocker, not a warning.
 *   Privilege grants (`GRANT`/`REVOKE` per DB role) are versioned like migrations, not applied by hand.
+*   Every new migration must be proven by an integration run against `db-test` (§11), not only by reading the SQL.
 
 ## 5. Offline-Sync & Idempotency Rules
 *   **Outcome-Replay**: The technician client operates offline and sends batches of actions (`client_action_id`, `client_seq`).
@@ -188,28 +192,135 @@ Target state per `systemdesign.md` §7. Until Phase 2 is complete, `StaticTokenA
 5. Always update `agents.md` if necessary to reflect any changes in the AI Agent rules or architectural constraints.
 6. **No administrative endpoint ships before the audit migration (Phase 1) is complete.** Without `admin` in `actor_role` and the administrative entity types, an admin action cannot be recorded at all.
 7. If an open decision (`D-1`–`D-5`) blocks implementation, stop and ask instead of picking a default silently.
+8. Run the verification pipeline from §11 before reporting a task as finished. Report the actual command output, never a summary of what the output "should" be.
 
-### Build & Verify Commands
-Run these after every change to validate the codebase:
+---
+
+## 11. 🧪 Test-Ausführung & Verifikation (Integration / E2E)
+
+Integrationstests benötigen **zwingend** eine echte PostgreSQL-Datenbank. Mocks sind für die DB-Schicht nicht zulässig — sie können weder Locking, noch Constraints, noch Trigger, noch SQLSTATE-Codes beweisen. Nutze für lokale Tests ausschließlich den ephemeren `db-test` Container (läuft in einer RAM-Disk auf Port **5433**), um die regulären Entwicklungsdaten nicht zu berühren.
+
+> **⚠️ Sicherheitsregel:** `TEST_DATABASE_URL` darf **niemals** auf die Entwicklungs- oder gar Produktionsdatenbank zeigen. Das Test-Cleanup führt `DROP SCHEMA public CASCADE` aus. Port `5432` ist die Dev-DB, Port `5433` ist die Test-DB. Wenn der Port nicht `5433` ist und die Datenbank nicht `resource_test` heißt: **nicht ausführen, sondern nachfragen.**
+
+### 11.1 Voraussetzung: `db-test` Service in `docker-compose.yml`
+
+Der Service liegt hinter dem Profil `test`, damit er beim normalen `docker compose up` nicht mitstartet. Ohne diesen Eintrag kann der Agent keine Integrationstests fahren — er ist damit Teil der Testvoraussetzungen und wird versioniert:
+
+```yaml
+services:
+  db-test:
+    image: postgres:17-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: resource_test
+      # PGDATA in ein Unterverzeichnis der tmpfs-Mount legen,
+      # damit der Entrypoint keine Verzeichnisreste vorfindet.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    # Durability ist für Wegwerf-Daten irrelevant; das halbiert die Laufzeit
+    # der Integrationstests. NIEMALS in einem anderen Service verwenden.
+    command:
+      - postgres
+      - -c
+      - fsync=off
+      - -c
+      - full_page_writes=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - max_connections=200
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d resource_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+```
+
+`max_connections` ist bewusst erhöht: die Concurrency-Tests (SEC-18) öffnen parallele Transaktionen zusätzlich zum Pool.
+
+### 11.2 Vorgaben für den Agenten zur Testausführung
+
+1. **Test-Datenbank hochfahren** (`--wait` blockiert bis der Healthcheck grün ist — ohne das schlägt der erste Testlauf mit *connection refused* fehl):
+
+   ```bash
+   docker compose --profile test up -d --wait db-test
+   ```
+
+2. **Umgebungsvariable setzen:** Der Wert muss exakt auf den Test-Container zeigen (Port 5433, DB `resource_test`):
+
+   ```powershell
+   # Windows (PowerShell):
+   $env:TEST_DATABASE_URL="postgres://dev:dev@localhost:5433/resource_test?sslmode=disable"
+   ```
+
+   ```bash
+   # Linux/macOS/Bash:
+   export TEST_DATABASE_URL="postgres://dev:dev@localhost:5433/resource_test?sslmode=disable"
+   ```
+
+3. **Tests ausführen:** Da das Test-Cleanup einen vollständigen Schema-Reset (`DROP SCHEMA public CASCADE`) durchführt, können die Tests beliebig oft gegen denselben Container laufen, ohne dass Datenreste stören. Caching muss deaktiviert sein (`-count=1`):
+
+   ```bash
+   go test -count=1 -p 1 ./...
+   ```
+
+   `-p 1` ist erforderlich, weil `internal/adapters/postgres` und `internal/adapters/http` sonst parallel dasselbe `public`-Schema zurücksetzen.
+
+4. **Fehlerbehebung:** Bei Fehlern im Test-Cleanup (insbesondere PostgreSQL OID-Caching-Fehler oder `cached plan must not change result type`) ist sicherzustellen, dass der Schema-Reset auf einer **separaten** Datenbankverbindung läuft, **bevor** der pgx-Pool für die Tests initialisiert wird. Siehe `migrations/README.md` für die Begründung.
+
+5. **Aufräumen** (optional, gibt den RAM frei):
+
+   ```bash
+   docker compose --profile test down -v
+   ```
+
+### 11.3 Vollständige Verifikationskette
+
+Nach **jeder** Änderung, in dieser Reihenfolge. Bricht ein Schritt ab, ist die Aufgabe nicht erledigt:
+
 ```sh
 go build ./...
 go vet ./...
-go test -count=1 ./...
+go test -count=1 ./...                        # Unit-Tests, Integration wird geskippt
+go test -count=1 -p 1 -race ./...             # mit TEST_DATABASE_URL gesetzt
 ```
 
-### Integration Tests
-PostgreSQL integration tests in `internal/adapters/postgres/` are **skipped automatically** when the `TEST_DATABASE_URL` environment variable is not set. To run them against a real database:
-```sh
-TEST_DATABASE_URL="postgres://user:pass@host/dbname" go test -count=1 -p 1 ./internal/adapters/postgres/...
+*   `-race` ist für die Concurrency-Tests (Last-Admin-Guard, Broker, Principal-Cache) verpflichtend.
+*   **Green skips sind kein Beweis.** Wenn `TEST_DATABASE_URL` nicht gesetzt ist, überspringen sich die Postgres-Tests selbst und der Lauf ist trotzdem grün. Der Agent muss vor der Erfolgsmeldung prüfen, dass tatsächlich integriert getestet wurde:
+
+    ```bash
+    go test -count=1 -p 1 -v ./internal/adapters/postgres/... | grep -c -- "--- SKIP"
+    ```
+
+    Ein Wert > 0 bedeutet: Umgebung falsch konfiguriert, Ergebnis wertlos.
+*   Am Ende jeder Phase läuft die vollständige Kette gegen `db-test`, nicht nur die betroffenen Pakete.
+
+### 11.4 Test-Cleanup: Schema-Reset statt `TRUNCATE` (seit Migration `000006`)
+
+`audit_events` blockiert `UPDATE`/`DELETE`/`TRUNCATE` per Trigger (SEC-20), und `audit_events.actor_id` referenziert `users(id)` — ein `TRUNCATE users CASCADE` läuft also in denselben Trigger. Beide Testpakete (`internal/adapters/postgres/postgres_test.go` und `internal/adapters/http/e2e_test.go`) führen daher
+
+```sql
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public;
 ```
 
-Use `-p 1` here because the postgres and http packages otherwise access the same test database in parallel.
+auf einer dedizierten Verbindung aus, danach `RunEmbeddedMigrations`, und **strikt davor** wird der `pgxpool.Pool` des Tests erzeugt. `TRUNCATE`-basiertes Cleanup darf für diese Tabellen nicht wieder eingeführt werden.
 
-**Test cleanup is a schema reset, not `TRUNCATE` (since migration `000006`)**: `audit_events` blocks `UPDATE`/`DELETE`/`TRUNCATE` via trigger (SEC-20), and `audit_events.actor_id` references `users(id)`, so `TRUNCATE users CASCADE` would hit the same trigger. Both `internal/adapters/postgres/postgres_test.go` and `internal/adapters/http/e2e_test.go` run `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` on a dedicated connection, then `RunEmbeddedMigrations`, strictly before creating the `pgxpool.Pool` the test itself uses — never `TRUNCATE`. Do not reintroduce `TRUNCATE`-based cleanup for these tables. See `migrations/README.md` for the pgx v5 cached-plan/OID rationale.
+**Offene Frage (in diesem Schritt nicht implementieren):** Sollen Integrationstests ein Schema pro Paket isolieren, damit sie wieder parallel laufen können? Der Schema-Reset setzt weiterhin das eine gemeinsame `public`-Schema zurück, deshalb bleibt `-p 1` erforderlich.
 
-Open question (do not implement in this step): should integration tests use schema isolation per package so they can safely run in parallel again? The schema-reset-per-test approach above still resets the single shared `public` schema, so `-p 1` remains required.
+### 11.5 Testkonventionen
 
-At the end of every phase, run the integration tests against the real test database. Green skips are not sufficient once the environment is available.
+*   **Unit-Tests** verwenden In-Package-Fakes (siehe `handler_test.go`), keine Mock-Bibliothek und keine Datenbank.
+*   **Integrationstests** liegen im jeweiligen Adapter-Paket und beginnen mit dem Guard, der bei fehlender `TEST_DATABASE_URL` skippt.
+*   **Zeit** wird über den `Clock`-Port gesteuert. Kein `time.Sleep` in Tests, um Ablauf von Tokens, Sessions oder Lockouts zu erzwingen — das ist ein Review-Blocker.
+*   **Testnamen** referenzieren die Regel, die sie beweisen: `TestRefreshReplayOutsideGraceRevokesFamily_SEC08`.
+*   **Negative Tests** prüfen SQLSTATE-Codes über `pgconn.PgError`, nicht über Textvergleich der Fehlermeldung.
+*   Fixtures/Seeds werden über die regulären Repositories bzw. die UoW angelegt, nicht per Roh-`INSERT`, damit Constraints und Audit-Regeln mitgeprüft werden. *(Siehe Tech Debt in `status.md` — Seeding läuft aktuell noch nicht über die UoW.)*
 
 ### Required Negative Tests (do not remove)
 | Rule | Test must prove |
@@ -225,7 +336,11 @@ At the end of every phase, run the integration tests against the real test datab
 | SEC-20 | `UPDATE`/`DELETE`/`TRUNCATE` on `audit_events` → error with SQLSTATE `42501` (not text match) |
 | SEC-25 | `refdata_tool` DB role cannot read identity/session/audit tables |
 
-### Environment Variables (Server)
+Die Tests zu SEC-16, SEC-18, SEC-20 und SEC-25 sind **ausschließlich** als Integrationstests aussagekräftig — sie prüfen Datenbank-Constraints, Trigger und Rechte. Ein Unit-Test mit Fake-Repository erfüllt diese Zeilen nicht.
+
+---
+
+## 12. Environment Variables (Server)
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
@@ -251,9 +366,16 @@ At the end of every phase, run the integration tests against the real test datab
 | `HTTP_IDLE_TIMEOUT` | ❌ | `60s` | Server idle timeout |
 | `HTTP_SHUTDOWN_TIMEOUT` | ❌ | `10s` | Graceful shutdown timeout |
 
+### Environment Variables (Tests)
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TEST_DATABASE_URL` | für Integrationstests | — | Muss auf `db-test` zeigen (Port `5433`, DB `resource_test`). Nicht gesetzt → Postgres-Tests skippen sich selbst. |
+
 Secrets are never baked into images or committed. Startup fails fast on invalid configuration — never fall back to an insecure default.
 
-### Adding a New Use Case + Endpoint (Checklist)
+---
+
+## 13. Adding a New Use Case + Endpoint (Checklist)
 1. Define use case input/output structs and implement logic in `internal/application/usecases/`.
 2. Add a local narrow interface in `internal/adapters/http/handler.go` (e.g., `type MyUseCase interface { Execute(...) }`).
 3. Add a field to the `handler` struct and update `NewHandler()` / `NewHandlerWithClock()`.
@@ -269,4 +391,6 @@ Secrets are never baked into images or committed. Startup fails fast on invalid 
 6. Add ownership/scope checks inside the use case where the permission alone is too coarse.
 7. Wire the concrete use case into `cmd/server/main.go` (composition root).
 8. Add handler tests using `httptest.NewRecorder` and in-package fake structs (see `handler_test.go`). All test requests for protected routes must include `Authorization: Bearer <token>` and a `fakeAuthenticator`. Cover at minimum: success, `400` malformed JSON, `401` missing token, `403` wrong role/permission, and the relevant `404`/`409`/`422` mappings.
-9. Update `status.md`.
+9. Add an E2E test in `internal/adapters/http/e2e_test.go` if the route mutates state — it must assert the resulting `audit_events` row (actor, action, from/to status) against the real database.
+10. Run the full verification chain from §11.3 against `db-test`.
+11. Update `status.md`.

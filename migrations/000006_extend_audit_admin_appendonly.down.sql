@@ -49,7 +49,8 @@ ALTER TABLE audit_events
         entity_type IN ('request', 'allocation', 'resource')
     );
 
--- The REVOKE statements from 000006.up.sql are intentionally NOT reverted
--- here: they only revoke privileges from PUBLIC, which has none on this
--- table by default (the owning role is unaffected), so there is nothing to
--- restore - and re-granting to PUBLIC would be a regression, not a rollback.
+-- The REVOKE UPDATE, DELETE statement from 000006.up.sql is intentionally NOT
+-- reverted here: it only revokes privileges from PUBLIC, which has none on
+-- this table by default (the owning role is unaffected), so there is
+-- nothing to restore - and re-granting to PUBLIC would be a regression, not
+-- a rollback.

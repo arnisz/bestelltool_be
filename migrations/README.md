@@ -54,7 +54,7 @@
 - Trigger `trg_audit_events_no_update`, `trg_audit_events_no_delete` (beide `FOR EACH ROW`) und, seit `000006`, `trg_audit_events_no_truncate` (`FOR EACH STATEMENT`) blockieren Änderungen, Löschungen und `TRUNCATE`.
 - Seit `000006` löst `reject_audit_events_mutation()` mit `RAISE EXCEPTION ... USING ERRCODE = '42501'` aus. Konsumenten (und Tests) müssen auf den SQLSTATE `42501` prüfen, nicht auf den Fehlertext — der Text kann sich ändern, der Code ist der stabile Vertrag.
 - Für kontrollierte spätere Migrationen kann die Regel temporär angepasst werden, indem Trigger/Funktion in einer eigenen Migration gezielt gedroppt/ersetzt und danach wiederhergestellt werden.
-- `000006` enthält zusätzlich vorbereitende `REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM PUBLIC`-Statements. Diese sind **nicht** bereits eine wirksame Zugriffskontrolle, solange keine dedizierte Least-Privilege-Rolle für das Backend existiert (Phase 5, `systemdesign.md` §13) — siehe `docs/deployment.md` Abschnitt 6.
+- `000006` enthält zusätzlich ein vorbereitendes `REVOKE UPDATE, DELETE ON audit_events FROM PUBLIC`-Statement. Dieses ist **nicht** bereits eine wirksame Zugriffskontrolle, solange keine dedizierte Least-Privilege-Rolle für das Backend existiert (Phase 5, `systemdesign.md` §13) — siehe `docs/deployment.md` Abschnitt 6. Der `TRUNCATE`-Schutz stammt bewusst ausschließlich vom Trigger `trg_audit_events_no_truncate`, nicht vom `REVOKE`-Statement.
 
 ### `000006` Down-Migration: bekannte Fehlschlagbedingung
 - `000006_extend_audit_admin_appendonly.down.sql` stellt die alten `CHECK`-Constraints wieder her (`actor_role IN ('technician','dispatcher','system')`, `entity_type IN ('request','allocation','resource')`).
