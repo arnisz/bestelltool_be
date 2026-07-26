@@ -121,6 +121,10 @@ type requestResponse struct {
 	UpdatedAt                time.Time  `json:"updated_at"`
 }
 
+type healthzResponse struct {
+	Status string `json:"status"`
+}
+
 type errorEnvelope struct {
 	Error errorBody `json:"error"`
 }
@@ -215,9 +219,9 @@ func NewHandlerWithEventStreamAndClock(
 			http.HandlerFunc(h.handleEvents),
 		))
 
-	// Outer mux: /api/v1/ subtree is auth-guarded.
-	// Add unprotected routes (health checks, etc.) directly to this mux in main.go.
+	// Outer mux: public routes live directly on this mux; /api/v1/ stays auth-guarded.
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.Handle("/api/v1/", authMiddleware(auth, protected))
 
 	return mux
@@ -319,6 +323,10 @@ func (h *handler) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, requestFromDomain(req))
+}
+
+func (h *handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, healthzResponse{Status: "ok"})
 }
 
 func (h *handler) handleGetRequest(w http.ResponseWriter, r *http.Request) {

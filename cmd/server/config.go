@@ -8,6 +8,7 @@ import (
 )
 
 type serverConfig struct {
+	AppEnv          string
 	DatabaseURL     string
 	StaticTokens    string
 	RunMigrations   bool
@@ -28,12 +29,24 @@ func loadConfigFromEnv() (serverConfig, error) {
 	)
 
 	cfg := serverConfig{
+		AppEnv:       strings.TrimSpace(os.Getenv("APP_ENV")),
 		DatabaseURL:  strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		StaticTokens: strings.TrimSpace(os.Getenv("AUTH_STATIC_TOKENS")),
 		HTTPAddr:     strings.TrimSpace(os.Getenv("HTTP_ADDR")),
 	}
+	if cfg.AppEnv == "" {
+		return serverConfig{}, fmt.Errorf("APP_ENV is required")
+	}
+	switch cfg.AppEnv {
+	case "dev", "staging", "prod":
+	default:
+		return serverConfig{}, fmt.Errorf("APP_ENV must be one of: dev, staging, prod")
+	}
 	if cfg.DatabaseURL == "" {
 		return serverConfig{}, fmt.Errorf("DATABASE_URL is required")
+	}
+	if cfg.AppEnv != "dev" && cfg.StaticTokens != "" {
+		return serverConfig{}, fmt.Errorf("AUTH_STATIC_TOKENS is allowed only when APP_ENV=dev")
 	}
 	if cfg.StaticTokens == "" {
 		return serverConfig{}, fmt.Errorf("AUTH_STATIC_TOKENS is required")

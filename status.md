@@ -1,20 +1,43 @@
 # Project Status: Resource Planning System (Go Backend)
 
 ## 🎯 Current Focus
-Dockerfile und `docker-compose.yml` für das Backend und die PostgreSQL-Datenbank erstellen (Grundlage für das künftige Deployment).
+Dockerfile und `compose.yml` für das Backend und die PostgreSQL-Datenbank erstellen (Grundlage für das künftige Deployment und für reproduzierbare Integrationstests).
+
+Direkt danach beginnt **Phase 1 der Benutzerverwaltung**: die Audit-Erweiterung um die Rolle `admin` und administrative Entity-Typen. Ohne diese Migration kann keine administrative Aktion revisionssicher protokolliert werden — sie ist deshalb die erste fachliche Änderung des neuen Bereichs, nicht die Oberfläche.
 
 ## ⚙️ Server-Konfiguration (Umgebungsvariablen)
+
+### Bestehend
 
 | Variable | Required | Default | Beschreibung |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | ✅ | — | PostgreSQL Connection String |
-| `AUTH_STATIC_TOKENS` | ✅ | — | Statische Bearer-Token (`token:user-id:role,...`) |
+| `AUTH_STATIC_TOKENS` | nur `dev` | — | Statische Bearer-Token (`token:user-id:role,...`) — Übergangslösung, ab Phase 2 nur noch bei `APP_ENV=dev` zulässig (SEC-26) |
 | `RUN_MIGRATIONS` | ❌ | `false` | Führt beim Serverstart eingebettete Up-Migrationen aus (`true`/`1`) |
 | `HTTP_ADDR` | ❌ | `:8080` | HTTP Listen-Adresse |
 | `HTTP_READ_TIMEOUT` | ❌ | `15s` | Read-Timeout |
 | `HTTP_WRITE_TIMEOUT` | ❌ | `15s` | Write-Timeout |
 | `HTTP_IDLE_TIMEOUT` | ❌ | `60s` | Idle-Timeout |
 | `HTTP_SHUTDOWN_TIMEOUT` | ❌ | `10s` | Graceful-Shutdown-Timeout |
+
+### Geplant (Benutzerverwaltung, Phase 2–3)
+
+| Variable | Required | Default | Beschreibung |
+|----------|----------|---------|-------------|
+| `APP_ENV` | ✅ | — | `dev` / `staging` / `prod`; steuert die Zulässigkeit von `AUTH_STATIC_TOKENS` |
+| `AUTH_MODE` | ❌ | `session` | `session` (Login/Refresh) oder `static` (nur `dev`) |
+| `ACCESS_TOKEN_TTL` | ❌ | `15m` | Lebensdauer des Access-Tokens |
+| `REFRESH_TOKEN_TTL` | ❌ | `720h` | Lebensdauer des Refresh-Tokens (30 d, muss die Offline-Phase der Techniker abdecken) |
+| `SESSION_IDLE_TTL` | ❌ | `720h` | Idle-Timeout der Session |
+| `SESSION_MAX_LIFETIME` | ❌ | `2160h` | Absolute Obergrenze (90 d) |
+| `REFRESH_REPLAY_GRACE` | ❌ | `30s` | Toleranzfenster für wiederholte Refresh-Requests (Entscheidung D-2); `0` deaktiviert |
+| `PRINCIPAL_CACHE_TTL` | ❌ | `30s` | Obergrenze der Widerrufsverzögerung (SEC-11) |
+| `ARGON2_MEMORY_KIB` | ❌ | `19456` | Argon2id-Speicher (OWASP-Minimum 19 MiB) |
+| `ARGON2_TIME` | ❌ | `2` | Argon2id-Iterationen |
+| `ARGON2_PARALLELISM` | ❌ | `1` | Argon2id-Parallelität |
+| `LOGIN_MAX_ATTEMPTS` | ❌ | `10` | Fehlversuche bis zur zeitlichen Sperre |
+| `LOGIN_LOCKOUT_WINDOW` | ❌ | `15m` | Dauer der zeitlichen Sperre |
+| `TRUST_PROXY_HEADERS` | ❌ | `false` | Nur aktivieren, wenn ausschließlich der eigene Reverse Proxy (Caddy) erreichbar ist — sonst ist die IP-basierte Drosselung fälschbar |
 
 ## ✅ Completed
 - [x] System Architecture and Requirements defined (`systemdesign.md`).
@@ -69,21 +92,90 @@ Dockerfile und `docker-compose.yml` für das Backend und die PostgreSQL-Datenban
 - [x] **Rollenbezeichnung vereinheitlicht**: Migration `000005` setzt `'dispatcher'` als einzigen kanonischen Rollenwert in `users.role` und `audit_events.actor_role` durch. `mapActorRole`-Mapping-Funktion entfernt. Alle Schichten (Domain, HTTP, Token-Config, DB) verwenden jetzt denselben Wert `"dispatcher"`. Cross-Technician-Verhalten als bewusste Designentscheidung in `systemdesign.md` dokumentiert (vollständig auditsicher durch AuditEvent pro Transaktion).
 - [x] HTTP-Endpunkt für Direct Transfer angebunden (`POST /api/v1/resources/{id}/transfer`) mit strikter Rollenfreigabe nur für Dispatcher; Handler nutzt `decodeJSONBody`, `buildAuditMeta` und zentrales Fehler-Mapping. Composition Root in `main.go` verdrahtet. Handler-Tests für Success/400/401/403/404/409/422 ergänzt.
 - [x] SSE-Adapter vorbereitet: neuer Event-Port (`internal/application/ports/event.go`), in-memory SSE-Broker (`internal/adapters/sse`), geschützter Stream-Endpunkt `GET /api/v1/events` mit Rollenfilter (Dispatcher: alle Events, Techniker: nur eigene). Schreibende Use Cases publizieren typisierte Events; Composition Root verdrahtet Publisher + Stream. Unit-Tests für Broker/Handler ergänzt.
-- [x] SSE-Handshake gehärtet: `GET /api/v1/events` flush’t jetzt direkt nach dem Schreiben der SSE-Header (vor `Subscribe`), damit Clients die Verbindung sofort erkennen, auch wenn das Stream-Backend beim Subscriben kurz blockiert. Regressionstest `TestHandleEventsFlushesBeforeSubscribeReturns` ergänzt.
+- [x] SSE-Handshake gehärtet: `GET /api/v1/events` flush't jetzt direkt nach dem Schreiben der SSE-Header (vor `Subscribe`), damit Clients die Verbindung sofort erkennen, auch wenn das Stream-Backend beim Subscriben kurz blockiert. Regressionstest `TestHandleEventsFlushesBeforeSubscribeReturns` ergänzt.
 - [x] Fachentscheidung finalisiert und dokumentiert: Direct Transfers und operative Ressourcenallokationen liegen ausschließlich beim Dispatcher; Techniker-zu-Techniker-Transfer ist ausgeschlossen (`systemdesign.md`).
 - [x] End-to-End-Test ergänzt: `TestResourceLifecycleE2E` verifiziert den vollständigen HTTP→UseCase→Repository→PostgreSQL-Durchstich über `httptest.Server` inkl. Rollen-Negativfall `403` für Techniker-Direct-Transfer (`internal/adapters/http/e2e_test.go`, Skip ohne `TEST_DATABASE_URL`).
 - [x] Migrations-Runner für den Serverstart implementiert: SQL-Migrationen via `go:embed` ins Binary eingebettet; zentraler Runner im Postgres-Adapter; optionaler Startup-Lauf über `RUN_MIGRATIONS` mit fail-fast bei Fehler.
 - [x] Deployment-Strategie für automatische Migrationen beim Serverstart dokumentiert (`docs/deployment.md`): klare Umgebungsregeln für `RUN_MIGRATIONS`, Multi-Instanz-Empfehlung (`RUN_MIGRATIONS=false` in Staging/Prod), dedizierter Pre-Deployment-Migrationsschritt und manuelle Rollback-Policy für Down-Migrationen.
+- [x] **Architektur um Identity-, Autorisierungs- und Benutzerverwaltungsmodell erweitert** (`systemdesign.md`, Abschnitte 5–13): Datenmodell (`users`, `auth_identities`, `roles`, `permissions`, `role_permissions`, `user_roles`, `sessions`, `refresh_tokens`), Berechtigungsmodell mit Deny-by-Default, Session-/Token-Konzept mit Rotation und Replay-Erkennung, `active_role` bei Mehrfachrollen, Audit-Erweiterung, Datenschutz-/Aufbewahrungsvorgaben, numerierte Sicherheitsanforderungen `SEC-01`–`SEC-27`, offene Entscheidungen `D-1`–`D-5` und Migrationsphasen.
 
 ## ⏭️ Next Steps (in order)
-1. Dockerfile und `docker-compose.yml` für das Backend und die PostgreSQL-Datenbank erstellen (Grundlage für das künftige Deployment).
-2. Tech-Debt auflösen: Echte Session-/Token-basierte Authentifizierung statt `StaticTokenAuthenticator` umsetzen.
+
+### Phase 0 — Deployment-Grundlage
+1. [ ] Dockerfile (Multi-Stage, non-root User, `CGO_ENABLED=0`) und `compose.yml` für Backend + PostgreSQL erstellen. Secrets nicht ins Image; `AUTH_STATIC_TOKENS` nur im dev-Compose.
+
+### Phase 1 — Audit-Fundament (Voraussetzung für alles Administrative)
+2. [ ] Migration `000006`: `audit_events.actor_role` CHECK um `'admin'` erweitern; `entity_type` um `user`, `role`, `user_role`, `resource_class`, `resource_class_membership`, `session`, `auth_identity` erweitern. Kein Foreign Key auf `roles(code)` (Audit muss von Stammdaten unabhängig bleiben, SEC-20-Begründung in `systemdesign.md` §8.1).
+3. [ ] Append-Only technisch erzwingen (SEC-20): `REVOKE UPDATE, DELETE ON audit_events` für die Anwendungsrolle **plus** `BEFORE UPDATE OR DELETE`-Trigger mit `RAISE EXCEPTION`. Integrationstest, der ein `UPDATE`/`DELETE` versucht und den Fehler erwartet.
+4. [ ] Aktions-Taxonomie im Code als Konstanten festschreiben (`user.create`, `role.assign`, `session.revoke`, `session.replay_detected`, `auth.login_failed`, …) statt freier Strings.
+
+### Phase 2 — Auth-Kern (löst `AUTH_STATIC_TOKENS` ab)
+5. [ ] Migration `000007`: `users` um `username` (Backfill → `NOT NULL` → `UNIQUE`), `email`, `version`, `created_at`, `updated_at` erweitern. `users.role` bleibt vorerst bestehen (Expand/Contract).
+6. [ ] Migration `000008`: `auth_identities`, `sessions`, `refresh_tokens` inkl. Indizes anlegen.
+7. [ ] Ports ergänzen: `UserRepository`, `AuthIdentityRepository`, `SessionRepository`, `RefreshTokenRepository`, `PasswordHasher`, `SecretGenerator`, `Clock`.
+8. [ ] Adapter `internal/adapters/auth/argon2`: Argon2id-Hasher mit PHC-Kodierung, konfigurierbaren Parametern, `NeedsRehash` und Rehash-on-Login (SEC-02).
+9. [ ] Token-Adapter: `rp_at_<id>.<secret>` / `rp_rt_<id>.<secret>`, ≥32 Byte aus `crypto/rand`, Speicherung nur als SHA-256-Hash, Vergleich über `crypto/subtle` (SEC-04, SEC-07).
+10. [ ] Use Cases `Login`, `RefreshSession`, `Logout`, `ChangeOwnPassword` — je mit Audit-Event in derselben Transaktion (SEC-21).
+11. [ ] Refresh-Rotation inkl. Replay-Erkennung: verbrauchter Token außerhalb `REFRESH_REPLAY_GRACE` ⇒ gesamte Token-Familie + Session widerrufen und auditieren (SEC-08). Unit-Test für Familien-Widerruf und für das Grace-Fenster (D-2).
+12. [ ] `SessionAuthenticator` als neuer `ports.Authenticator`; Principal-Cache mit harter TTL (SEC-11).
+13. [ ] Drosselung für `login`/`refresh` pro Konto und pro Quell-IP, `429` + `Retry-After` in `mapHTTPError` ergänzen (SEC-05). IP-Ermittlung nur über Proxy-Header, wenn `TRUST_PROXY_HEADERS=true`.
+14. [ ] Timing-Gleichheit bei unbekanntem Benutzer: Dummy-Argon2id-Verifikation, einheitliche Fehlermeldung (SEC-03). Test, der die drei Fehlerfälle auf identische Response prüft.
+15. [ ] `AUTH_STATIC_TOKENS` nur noch bei `APP_ENV=dev` zulassen, sonst Startup-Fehler (SEC-26).
+
+### Phase 3 — Rollen & Berechtigungen
+16. [ ] Migration `000009`: `roles`, `permissions`, `role_permissions`, `user_roles` (inkl. `CHECK (assigned_by <> user_id)`) anlegen; Katalog aus `systemdesign.md` §6.2 seeden; `system.is_assignable = false`.
+17. [ ] Migration `000010`: `user_roles` aus `users.role` backfillen.
+18. [ ] `PermissionResolver`-Port + PostgreSQL-Adapter; `requirePermissions`-Middleware; alle bestehenden Routen von `requireRoles` umstellen.
+19. [ ] Deny-by-Default-Test: enumeriert alle registrierten Routen und schlägt fehl, sobald eine Route keine Permission deklariert (SEC-13).
+20. [ ] `active_role` in der Session; `SwitchActiveRole` erzeugt eine **neue** Session und widerruft die alte; Validierung von `active_role` gegen `user_roles` bei jedem Refresh (SEC-14).
+21. [ ] `GET /api/v1/auth/me` liefert `user_id`, `active_role`, `roles`, effektive Permissions.
+
+### Phase 4 — Admin-Endpunkte
+22. [ ] Use Cases: `ListUsers`, `GetUser`, `CreateUser`, `UpdateUser`, `DisableUser`, `ReactivateUser`, `AssignRole`, `RevokeRole`, `RevokeUserSessions`, `ResetLocalPassword`, `ListUserAuditEvents`.
+23. [ ] Invariante „letzter aktiver Admin" **race-frei** implementieren (SEC-18): `SELECT … FOR UPDATE` über die Admin-Zuweisungen bzw. transaktionsgebundener Advisory Lock. Integrationstest mit zwei parallelen Transaktionen, der beweist, dass nicht beide durchkommen.
+24. [ ] Selbstzuweisung von Rollen im Use Case ablehnen (SEC-16); Negativtest gegen den DB-`CHECK` als zweite Verteidigungslinie.
+25. [ ] Session-Widerruf bei Deaktivierung, Rollenänderung und Passwort-Reset (SEC-10); Test, dass ein vorher gültiger Access-Token innerhalb `PRINCIPAL_CACHE_TTL` ungültig wird.
+26. [ ] `GET /api/v1/admin/audit-events` mit Permission `audit.read`, Filter nach Zeitraum, Actor und Entity; keine Schreibpfade.
+27. [ ] E2E-Test `TestUserAdministrationE2E`: Admin legt Benutzer an, weist Rolle zu, Benutzer loggt sich ein, Admin deaktiviert ihn, Folgeaufruf ⇒ `401`; Negativfall: Admin versucht Direct Transfer ⇒ `403` (SEC-15).
+
+### Phase 5 — Datenbank-Privilegien & .NET-Grenze
+28. [ ] Drei getrennte PostgreSQL-Rollen: `app_backend` (DML, kein DDL), `app_migrator` (DDL), `refdata_tool` (nur Referenztabellen). `GRANT`/`REVOKE`-Skripte versionieren und im Deployment ausführen (SEC-24, SEC-25).
+29. [ ] Integrationstest, der mit `refdata_tool`-Credentials beweist, dass Zugriffe auf `users`, `auth_identities`, `sessions`, `refresh_tokens` und `audit_events` scheitern.
+30. [ ] `docs/deployment.md` um Rollen-, Secret- und TLS-Vorgaben ergänzen (SEC-27).
+
+### Phase 6 — Optional / später
+31. [ ] Aufbewahrungs-Job für Session- und Audit-Daten mit konfigurierbaren Fristen (Abschnitt 9).
+32. [ ] OIDC-Adapter (Entra ID) mit Authorization Code Flow + PKCE, externer Systembrowser (RFC 8252), Mapping `provider_subject` → interner Benutzer. Abhängig von D-5.
+33. [ ] Contract-Migration: `users.role` entfernen, sobald kein Codepfad mehr darauf liest (nicht im selben Release wie Phase 3).
+34. [ ] Optional: `prev_hash`-Kette in `audit_events` für Manipulationsnachweis.
+
+### Begleitend
+35. [ ] `agents.md` um die neuen Architekturregeln ergänzen (Text siehe unten).
+
+## 📌 Neue Regeln für `agents.md`
+- Routen deklarieren **Permissions**, nie Rollen. Eine Route ohne Permission-Deklaration ist ein Fehler und muss `403` liefern (SEC-13).
+- Actor-Identität und `actor_role` kommen ausschließlich aus dem authentifizierten Principal, niemals aus dem Request-Body (SEC-01).
+- Kryptografie (Argon2id, `crypto/rand`, Hashing, Token-Kodierung) lebt ausschließlich in Adaptern. Die Domain kennt nur die Ports `PasswordHasher`, `SecretGenerator` und `Clock`.
+- Jede sicherheitsrelevante Mutation läuft über die `UnitOfWork` und schreibt ihr `AuditEvent` in derselben Transaktion (SEC-21).
+- Keine Zeit aus `time.Now()` in Domain oder Application — immer über den `Clock`-Port.
+- Secrets, Token und Hashes erscheinen nie in Logs, URLs, Fehlermeldungen oder Audit-Payloads (SEC-06, SEC-23).
+- Administrative Berechtigungen implizieren niemals operative (SEC-15).
 
 ## ⚠️ Known Issues / Tech Debt
-- **StaticTokenAuthenticator** (`internal/adapters/auth`) ist eine Übergangslösung. Tokens stehen im Klartext in der Umgebungsvariable `AUTH_STATIC_TOKENS`. Vor Produktion durch eine echte Session-/Token-basierte Authentifizierung ersetzen (z. B. JWT mit Schlüsselrotation oder externe IdP-Integration).
+- **StaticTokenAuthenticator** (`internal/adapters/auth`) ist eine Übergangslösung. Tokens stehen im Klartext in `AUTH_STATIC_TOKENS`. Ablösung in Phase 2; danach nur noch bei `APP_ENV=dev` zulässig und in Phase 3 vollständig entfernen.
+- **Audit-Schema unvollständig**: `actor_role` kennt `admin` nicht, `entity_type` kennt keine administrativen Typen. Bis Migration `000006` können administrative Aktionen nicht protokolliert werden — daher dürfen vorher **keine** Admin-Endpunkte ausgeliefert werden.
+- **Audit-Unveränderlichkeit ist bisher nur eine Design-Zusage**, technisch noch nicht erzwungen (kein `REVOKE`, kein Trigger).
+- **Keine Drosselung** auf schreibenden oder künftigen Login-Endpunkten; `429` fehlt im zentralen Fehler-Mapping.
+- **`users`-Tabelle zu eng** (`id`, `role`, `display_name`, `is_active`): kein `username`, keine Mehrfachrollen, keine Versionierung.
+- **Rollenprüfung direkt an den Routen** (`requireRoles`) skaliert nicht auf Benutzer-, Gruppen- und Referenzverwaltung.
+- **Datenbank-Privilegien nicht getrennt**: Backend, Migrationen und das .NET-Tool nutzen bislang dasselbe Konto. Die dokumentierte Grenze des .NET-Tools ist damit reine Konvention und nicht durchgesetzt (SEC-25). Die Credentials eines kopierbaren Desktop-Clients sind als kompromittiert zu betrachten.
+- **Offene Entscheidung D-3**: Techniker dürfen derzeit alle Requests lesen. Bewusst gewählt und auditiert, aber vor dem Feldeinsatz mobiler Clients auf `request.read.own` einzuschränken.
+- **Kein Aufbewahrungskonzept** implementiert; Audit- und Session-Daten wachsen unbegrenzt (Datenschutz, Abschnitt 9).
 
 ## 📝 Rules for the AI Agent
 - **READ THIS FILE FIRST** at the start of every session or task.
 - **UPDATE THIS FILE** immediately when a task from "In Progress" or "Next Steps" is finished.
 - Move completed items to the "Completed" list and keep the "Current Focus" sharply aligned with the current immediate goal.
+- Reference the relevant `SEC-xx` requirement from `systemdesign.md` §11 in commit messages and tests for every security-relevant change.
+- No administrative endpoint ships before Phase 1 (audit extension) is complete.
 - At the end of every phase, run the PostgreSQL integration tests against the real test database (`TEST_DATABASE_URL` → `resource_test`) — green skips are not sufficient once the environment is available.

@@ -5,9 +5,15 @@ import (
 	"testing"
 )
 
-func TestLoadConfigFromEnvRunMigrationsDefaultFalse(t *testing.T) {
+func setBaseEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("APP_ENV", "dev")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/resource_test")
 	t.Setenv("AUTH_STATIC_TOKENS", "tok:tech-1:technician")
+}
+
+func TestLoadConfigFromEnvRunMigrationsDefaultFalse(t *testing.T) {
+	setBaseEnv(t)
 	t.Setenv("RUN_MIGRATIONS", "")
 
 	cfg, err := loadConfigFromEnv()
@@ -20,8 +26,7 @@ func TestLoadConfigFromEnvRunMigrationsDefaultFalse(t *testing.T) {
 }
 
 func TestLoadConfigFromEnvRunMigrationsEnabledValues(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/resource_test")
-	t.Setenv("AUTH_STATIC_TOKENS", "tok:tech-1:technician")
+	setBaseEnv(t)
 
 	for _, raw := range []string{"true", "1", "TRUE"} {
 		t.Run(raw, func(t *testing.T) {
@@ -39,8 +44,7 @@ func TestLoadConfigFromEnvRunMigrationsEnabledValues(t *testing.T) {
 }
 
 func TestLoadConfigFromEnvRunMigrationsRejectsInvalidValue(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/resource_test")
-	t.Setenv("AUTH_STATIC_TOKENS", "tok:tech-1:technician")
+	setBaseEnv(t)
 	t.Setenv("RUN_MIGRATIONS", "yes")
 
 	_, err := loadConfigFromEnv()
@@ -49,5 +53,46 @@ func TestLoadConfigFromEnvRunMigrationsRejectsInvalidValue(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "RUN_MIGRATIONS") {
 		t.Fatalf("error = %q, want mention RUN_MIGRATIONS", err.Error())
+	}
+}
+
+func TestLoadConfigFromEnvRequiresAppEnv(t *testing.T) {
+	t.Setenv("APP_ENV", "")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/resource_test")
+	t.Setenv("AUTH_STATIC_TOKENS", "tok:tech-1:technician")
+
+	_, err := loadConfigFromEnv()
+	if err == nil {
+		t.Fatal("loadConfigFromEnv() error = nil, want missing APP_ENV error")
+	}
+	if !strings.Contains(err.Error(), "APP_ENV") {
+		t.Fatalf("error = %q, want mention APP_ENV", err.Error())
+	}
+}
+
+func TestLoadConfigFromEnvRejectsInvalidAppEnvValue(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("APP_ENV", "qa")
+
+	_, err := loadConfigFromEnv()
+	if err == nil {
+		t.Fatal("loadConfigFromEnv() error = nil, want invalid APP_ENV error")
+	}
+	if !strings.Contains(err.Error(), "APP_ENV") {
+		t.Fatalf("error = %q, want mention APP_ENV", err.Error())
+	}
+}
+
+func TestLoadConfigFromEnvSEC26RejectsStaticTokensOutsideDev(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("APP_ENV", "prod")
+	t.Setenv("AUTH_STATIC_TOKENS", "tok:tech-1:technician")
+
+	_, err := loadConfigFromEnv()
+	if err == nil {
+		t.Fatal("loadConfigFromEnv() error = nil, want SEC-26 startup error")
+	}
+	if !strings.Contains(err.Error(), "AUTH_STATIC_TOKENS") {
+		t.Fatalf("error = %q, want mention AUTH_STATIC_TOKENS", err.Error())
 	}
 }

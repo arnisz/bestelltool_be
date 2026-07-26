@@ -37,3 +37,15 @@ Dieses Dokument definiert verbindlich, wie eingebettete Migrationen (`RUN_MIGRAT
 - Lokal/Test: `RUN_MIGRATIONS=true` erlaubt.
 - Staging/Produktion: `RUN_MIGRATIONS=false` verpflichtend, Migrationen via dediziertem Pre-Deployment-Schritt.
 - Keine automatische Ausführung von `.down.sql` durch Anwendungscode.
+
+## 6. Docker-Compose-Ableitung (Dev vs. Staging/Prod)
+
+- `compose.yml` im Repository ist **explizit ein Dev-Compose**:
+  - Backend läuft mit `APP_ENV=dev` und `RUN_MIGRATIONS=true`.
+  - `AUTH_STATIC_TOKENS` ist nur hier zulässig (SEC-26).
+  - Service `db` ist persistent (named volume) für lokale Entwicklung.
+  - Service `db-test` (Profile `test`) ist flüchtig (tmpfs) für reproduzierbare, leere Testläufe.
+- Für Staging/Produktion wird **keine** 1:1-Nutzung dieser Compose-Datei empfohlen:
+  - Migrationen laufen vorher in einem dedizierten Schritt (Abschnitt 3), nicht beim Replica-Start.
+  - `APP_ENV` ist `staging`/`prod`; `AUTH_STATIC_TOKENS` darf dann nicht gesetzt sein (fataler Startup-Fehler).
+  - Secrets werden über das Zielsystem bereitgestellt (Secret-Store/Runtime-Env), nicht im Image oder Repository.

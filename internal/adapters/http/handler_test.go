@@ -208,6 +208,32 @@ func TestAuthMiddlewareValidTokenPropagatesPrincipal(t *testing.T) {
 	}
 }
 
+func TestHealthzPublicWithoutAuth(t *testing.T) {
+	h := NewHandlerWithClock(
+		&fakeAuthenticator{err: fmt.Errorf("should not be called")},
+		&fakeCreateRequestUseCase{},
+		&fakeGetRequestUseCase{},
+		&fakeRequestReturnUseCase{},
+		&fakeTransferResourceUseCase{},
+		time.Now,
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got["status"] != "ok" {
+		t.Fatalf("status payload = %q, want ok", got["status"])
+	}
+}
+
 // ── Actor Field Rejection ──────────────────────────────────────────────────────
 
 // TestBodyWithActorFieldsReturns400 verifies that sending actor_id or actor_role
