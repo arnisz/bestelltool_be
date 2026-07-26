@@ -24,6 +24,10 @@ const (
 	ActionUserReactivate AuditAction = "user.reactivate"
 	// ActionUserPasswordReset records an admin-triggered password reset.
 	ActionUserPasswordReset AuditAction = "user.password_reset"
+	// ActionAuthPasswordChanged records a successful own-password change.
+	ActionAuthPasswordChanged AuditAction = "auth.password_changed"
+	// ActionAuthPasswordChangeFailed records a rejected own-password change.
+	ActionAuthPasswordChangeFailed AuditAction = "auth.password_change_failed"
 
 	// ActionRoleAssign records that a role was assigned to a user.
 	ActionRoleAssign AuditAction = "role.assign"
@@ -32,6 +36,8 @@ const (
 
 	// ActionSessionCreate records that a session was created (login).
 	ActionSessionCreate AuditAction = "session.create"
+	// ActionSessionRefresh records a successful refresh-token rotation.
+	ActionSessionRefresh AuditAction = "session.refresh"
 	// ActionSessionRevoke records that a session was revoked.
 	ActionSessionRevoke AuditAction = "session.revoke"
 	// ActionSessionReplayDetected records detected refresh-token replay

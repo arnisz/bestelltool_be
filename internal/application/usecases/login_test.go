@@ -78,11 +78,28 @@ func (r *fakeSessionRepository) Save(ctx context.Context, session *ports.Session
 	return nil
 }
 
+func (r *fakeSessionRepository) Update(ctx context.Context, session *ports.Session) error {
+	return r.Save(ctx, session)
+}
+
 func (r *fakeSessionRepository) GetByID(ctx context.Context, id string) (*ports.Session, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
 	return r.sessions[id], nil
+}
+
+func (r *fakeSessionRepository) GetByTokenHash(ctx context.Context, tokenHash []byte) (*ports.Session, error) {
+	for _, session := range r.sessions {
+		if string(session.TokenHash) == string(tokenHash) {
+			return session, nil
+		}
+	}
+	return nil, ports.ErrNotFound
+}
+
+func (r *fakeSessionRepository) GetForUpdate(ctx context.Context, id string) (*ports.Session, error) {
+	return r.GetByID(ctx, id)
 }
 
 func (r *fakeSessionRepository) Revoke(ctx context.Context, id string, at time.Time) error {
@@ -91,6 +108,18 @@ func (r *fakeSessionRepository) Revoke(ctx context.Context, id string, at time.T
 	}
 	if session, ok := r.sessions[id]; ok {
 		session.RevokedAt = &at
+	}
+	return nil
+}
+
+func (r *fakeSessionRepository) RevokeAllForUserExcept(ctx context.Context, userID domain.UserID, exceptSessionID string, at time.Time) error {
+	if r.err != nil {
+		return r.err
+	}
+	for id, session := range r.sessions {
+		if id != exceptSessionID && session.UserID == userID && session.RevokedAt == nil {
+			session.RevokedAt = &at
+		}
 	}
 	return nil
 }
@@ -115,6 +144,10 @@ func (r *fakeRefreshTokenRepository) GetByID(ctx context.Context, id string) (*p
 	return r.tokens[id], nil
 }
 
+func (r *fakeRefreshTokenRepository) GetForUpdate(ctx context.Context, id string) (*ports.RefreshToken, error) {
+	return r.GetByID(ctx, id)
+}
+
 func (r *fakeRefreshTokenRepository) Update(ctx context.Context, token *ports.RefreshToken) error {
 	if r.err != nil {
 		return r.err
@@ -134,6 +167,10 @@ func (r *fakeRefreshTokenRepository) GetFamily(ctx context.Context, familyID str
 		}
 	}
 	return result, nil
+}
+
+func (r *fakeRefreshTokenRepository) GetFamilyForUpdate(ctx context.Context, familyID string) ([]*ports.RefreshToken, error) {
+	return r.GetFamily(ctx, familyID)
 }
 
 type fakePasswordHasher struct {
@@ -193,6 +230,7 @@ type fakeTransaction struct {
 	authIds       *fakeAuthIdentityRepository
 	sessions      *fakeSessionRepository
 	refreshTokens *fakeRefreshTokenRepository
+	audits        *fakeAuditWriter
 }
 
 func (tx *fakeTransaction) Users() ports.UserRepository {
@@ -228,7 +266,14 @@ func (tx *fakeTransaction) Allocations() ports.AllocationRepository {
 }
 
 func (tx *fakeTransaction) Audits() ports.AuditWriter {
-	panic("not implemented in test")
+	if tx.audits == nil {
+		tx.audits = &fakeAuditWriter{}
+	}
+	return tx.audits
+}
+
+func (tx *fakeTransaction) AuditEvents() ports.AuditRepository {
+	return tx.Audits().(*fakeAuditWriter)
 }
 
 func (tx *fakeTransaction) Idempotency() ports.IdempotencyStore {
@@ -236,10 +281,12 @@ func (tx *fakeTransaction) Idempotency() ports.IdempotencyStore {
 }
 
 type fakeUnitOfWork struct {
-	tx *fakeTransaction
+	tx               *fakeTransaction
+	transactionCalls int
 }
 
 func (uow *fakeUnitOfWork) WithinTransaction(ctx context.Context, fn func(ctx context.Context, tx ports.Transaction) error) error {
+	uow.transactionCalls++
 	return fn(ctx, uow.tx)
 }
 
@@ -336,6 +383,12 @@ func TestLoginSuccess(t *testing.T) {
 		if token.SessionID == "" {
 			t.Error("RefreshToken has empty SessionID")
 		}
+	}
+	if tx.audits == nil || len(tx.audits.events) != 1 {
+		t.Fatalf("login audit event count = %d, want 1", len(tx.audits.events))
+	}
+	if got := tx.audits.events[0].Action; got != string(domain.ActionSessionCreate) {
+		t.Fatalf("login audit action = %q, want %q", got, domain.ActionSessionCreate)
 	}
 }
 
@@ -536,6 +589,12 @@ func TestLoginWrongPassword(t *testing.T) {
 	}
 	if len(tx.refreshTokens.tokens) != 0 {
 		t.Error("RefreshToken should not be created for wrong password")
+	}
+	if tx.audits == nil || len(tx.audits.events) != 1 {
+		t.Fatalf("failed login audit event count = %d, want 1", len(tx.audits.events))
+	}
+	if got := tx.audits.events[0].Action; got != string(domain.ActionAuthLoginFailed) {
+		t.Fatalf("failed login audit action = %q, want %q", got, domain.ActionAuthLoginFailed)
 	}
 }
 

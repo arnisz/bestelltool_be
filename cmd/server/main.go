@@ -15,6 +15,7 @@ import (
 	httpadapter "bestelltool_be/internal/adapters/http"
 	"bestelltool_be/internal/adapters/postgres"
 	"bestelltool_be/internal/adapters/sse"
+	"bestelltool_be/internal/application/ports"
 	"bestelltool_be/internal/application/usecases"
 )
 
@@ -50,19 +51,31 @@ func run() error {
 	}
 	defer pool.Close()
 
-	authenticator, err := authadapter.ParseStaticTokens(cfg.StaticTokens)
-	if err != nil {
-		return fmt.Errorf("parse static tokens: %w", err)
-	}
-
 	uow := postgres.NewUnitOfWork(pool)
 	passwordHasher := authadapter.NewArgon2Hasher(authadapter.DefaultArgon2Config())
 	secretGenerator := authadapter.NewSecretGenerator(authadapter.DefaultTokenConfig())
-	loginUseCase := usecases.NewLoginUseCase(uow, passwordHasher, secretGenerator, systemClock{})
+	clock := systemClock{}
+	loginUseCase := usecases.NewLoginUseCase(uow, passwordHasher, secretGenerator, clock)
+	tokenEncryptor, err := authadapter.NewTokenEncryptorFromBase64Key(cfg.EncryptionKey)
+	if err != nil {
+		return fmt.Errorf("create token encryptor: %w", err)
+	}
+	refreshSessionUseCase := usecases.NewRefreshSessionUseCase(uow, secretGenerator, tokenEncryptor, clock)
+	logoutUseCase := usecases.NewLogoutUseCase(uow, clock)
+	changeOwnPasswordUseCase := usecases.NewChangeOwnPasswordUseCase(uow, passwordHasher, clock)
+	var authenticator ports.Authenticator
+	if cfg.AuthMode == "static" {
+		authenticator, err = authadapter.ParseStaticTokens(cfg.StaticTokens)
+		if err != nil {
+			return fmt.Errorf("parse static tokens: %w", err)
+		}
+	} else {
+		authenticator = authadapter.NewSessionAuthenticator(uow, clock)
+	}
 	requestRepo := postgres.NewRequestRepository(pool)
 	eventStream := sse.NewBroker(0)
 
-	handler := httpadapter.NewHandlerWithEventStreamAndLogin(
+	handler := httpadapter.NewHandlerWithEventStreamAndAuthenticationAndSecurity(
 		authenticator,
 		usecases.NewCreateRequestUseCaseWithPublisher(uow, eventStream),
 		usecases.NewGetRequestUseCase(requestRepo),
@@ -70,6 +83,10 @@ func run() error {
 		usecases.NewTransferResourceUseCaseWithPublisher(uow, eventStream),
 		eventStream,
 		loginUseCase,
+		refreshSessionUseCase,
+		logoutUseCase,
+		changeOwnPasswordUseCase,
+		httpadapter.NewRateLimiter(10, time.Minute, cfg.TrustProxyHeaders, time.Now),
 	)
 
 	srv := &http.Server{

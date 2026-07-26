@@ -25,6 +25,22 @@ type LoginUseCase interface {
 	Execute(ctx context.Context, in usecases.LoginInput) (*usecases.LoginOutput, error)
 }
 
+// RefreshSessionUseCase is the inbound port for refresh-token rotation.
+type RefreshSessionUseCase interface {
+	Execute(ctx context.Context, in usecases.RefreshSessionInput) (*usecases.RefreshSessionOutput, error)
+}
+
+// LogoutUseCase is the inbound port for session revocation.
+type LogoutUseCase interface {
+	Execute(ctx context.Context, in usecases.LogoutInput) error
+}
+
+// ChangeOwnPasswordUseCase is the inbound port for changing the authenticated
+// user's password.
+type ChangeOwnPasswordUseCase interface {
+	Execute(ctx context.Context, in usecases.ChangeOwnPasswordInput) error
+}
+
 // CreateRequestUseCase is the inbound port for creating requests.
 type CreateRequestUseCase interface {
 	Execute(ctx context.Context, in usecases.CreateRequestInput) (*domain.Request, error)
@@ -62,13 +78,17 @@ func PrincipalFromContext(ctx context.Context) (*ports.Principal, bool) {
 }
 
 type handler struct {
-	login            LoginUseCase
-	createRequest    CreateRequestUseCase
-	getRequest       GetRequestUseCase
-	requestReturn    RequestReturnUseCase
-	transferResource TransferResourceUseCase
-	eventStream      EventStream
-	now              func() time.Time
+	login             LoginUseCase
+	refreshSession    RefreshSessionUseCase
+	logout            LogoutUseCase
+	changeOwnPassword ChangeOwnPasswordUseCase
+	rateLimiter       *RateLimiter
+	createRequest     CreateRequestUseCase
+	getRequest        GetRequestUseCase
+	requestReturn     RequestReturnUseCase
+	transferResource  TransferResourceUseCase
+	eventStream       EventStream
+	now               func() time.Time
 }
 
 type createRequestPayload struct {
@@ -177,6 +197,40 @@ func NewHandlerWithEventStreamAndLogin(
 	return NewHandlerWithEventStreamAndClockAndLogin(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now, login)
 }
 
+// NewHandlerWithEventStreamAndAuthentication builds the HTTP adapter with all
+// Phase-2 authentication endpoints wired.
+func NewHandlerWithEventStreamAndAuthentication(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	eventStream EventStream,
+	login LoginUseCase,
+	refreshSession RefreshSessionUseCase,
+	logout LogoutUseCase,
+) http.Handler {
+	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now, login, refreshSession, logout, nil, nil)
+}
+
+// NewHandlerWithEventStreamAndAuthenticationAndSecurity builds the HTTP
+// adapter with Phase-2 authentication endpoints and rate limiting.
+func NewHandlerWithEventStreamAndAuthenticationAndSecurity(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	eventStream EventStream,
+	login LoginUseCase,
+	refreshSession RefreshSessionUseCase,
+	logout LogoutUseCase,
+	changeOwnPassword ChangeOwnPasswordUseCase,
+	rateLimiter *RateLimiter,
+) http.Handler {
+	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, time.Now, login, refreshSession, logout, changeOwnPassword, rateLimiter)
+}
+
 // NewHandlerWithClock builds the HTTP adapter and allows deterministic tests.
 // All /api/v1/* routes are protected by the auth middleware followed by per-route
 // role checks via requireRoles. Unprotected routes (e.g. GET /health) must be
@@ -217,18 +271,61 @@ func NewHandlerWithEventStreamAndClockAndLogin(
 	now func() time.Time,
 	login LoginUseCase,
 ) http.Handler {
+	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, now, login, nil, nil, nil, nil)
+}
+
+// NewHandlerWithEventStreamAndClockAndAuthentication builds the HTTP adapter
+// with deterministic time and all Phase-2 authentication use cases.
+func NewHandlerWithEventStreamAndClockAndAuthentication(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	eventStream EventStream,
+	now func() time.Time,
+	login LoginUseCase,
+	refreshSession RefreshSessionUseCase,
+	logout LogoutUseCase,
+) http.Handler {
+	return NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(auth, createRequest, getRequest, requestReturn, transferResource, eventStream, now, login, refreshSession, logout, nil, nil)
+}
+
+// NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity builds the
+// HTTP adapter with deterministic dependencies for all Phase-2 endpoints.
+func NewHandlerWithEventStreamAndClockAndAuthenticationAndSecurity(
+	auth Authenticator,
+	createRequest CreateRequestUseCase,
+	getRequest GetRequestUseCase,
+	requestReturn RequestReturnUseCase,
+	transferResource TransferResourceUseCase,
+	eventStream EventStream,
+	now func() time.Time,
+	login LoginUseCase,
+	refreshSession RefreshSessionUseCase,
+	logout LogoutUseCase,
+	changeOwnPassword ChangeOwnPasswordUseCase,
+	rateLimiter *RateLimiter,
+) http.Handler {
 	if now == nil {
 		now = time.Now
 	}
+	if rateLimiter == nil {
+		rateLimiter = NewRateLimiter(10, time.Minute, false, now)
+	}
 
 	h := &handler{
-		login:            login,
-		createRequest:    createRequest,
-		getRequest:       getRequest,
-		requestReturn:    requestReturn,
-		transferResource: transferResource,
-		eventStream:      eventStream,
-		now:              now,
+		login:             login,
+		refreshSession:    refreshSession,
+		logout:            logout,
+		changeOwnPassword: changeOwnPassword,
+		rateLimiter:       rateLimiter,
+		createRequest:     createRequest,
+		getRequest:        getRequest,
+		requestReturn:     requestReturn,
+		transferResource:  transferResource,
+		eventStream:       eventStream,
+		now:               now,
 	}
 
 	// Inner mux: each route carries an explicit role allowlist via requireRoles.
@@ -254,11 +351,20 @@ func NewHandlerWithEventStreamAndClockAndLogin(
 		requireRoles(domain.ActorRoleDispatcher, domain.ActorRoleTechnician)(
 			http.HandlerFunc(h.handleEvents),
 		))
+	protected.Handle("POST /api/v1/auth/logout",
+		requireRoles(domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleAdmin)(
+			http.HandlerFunc(h.handleLogout),
+		))
+	protected.Handle("POST /api/v1/auth/password/change",
+		requireRoles(domain.ActorRoleTechnician, domain.ActorRoleDispatcher, domain.ActorRoleAdmin)(
+			http.HandlerFunc(h.handleChangeOwnPassword),
+		))
 
 	// Outer mux: public routes live directly on this mux; /api/v1/ stays
 	// auth-guarded except explicit public endpoints.
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/auth/login", h.handleLogin)
+	mux.Handle("POST /api/v1/auth/login", h.rateLimiter.limitLogin(http.HandlerFunc(h.handleLogin)))
+	mux.Handle("POST /api/v1/auth/refresh", h.rateLimiter.limitRefresh(http.HandlerFunc(h.handleRefreshSession)))
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.Handle("/api/v1/", authMiddleware(auth, protected))
 
@@ -627,6 +733,8 @@ func mapHTTPError(err error) (int, string, string) {
 	switch {
 	case errors.Is(err, ports.ErrUnauthenticated):
 		return http.StatusUnauthorized, "unauthenticated", "invalid or missing credentials"
+	case errors.Is(err, ports.ErrCredentialsInvalid):
+		return http.StatusUnauthorized, "unauthenticated", "invalid credentials"
 	case errors.Is(err, ports.ErrForbidden):
 		return http.StatusForbidden, "forbidden", "forbidden"
 	case errors.Is(err, ports.ErrNotFound):
@@ -641,6 +749,8 @@ func mapHTTPError(err error) (int, string, string) {
 		errors.Is(err, domain.ErrReasonRequired),
 		errors.Is(err, domain.ErrInvalidTransition):
 		return http.StatusUnprocessableEntity, "validation_error", "validation failed"
+	case errors.Is(err, ports.ErrThrottled):
+		return http.StatusTooManyRequests, "throttled", "too many requests"
 	default:
 		return http.StatusInternalServerError, "internal_error", "internal server error"
 	}

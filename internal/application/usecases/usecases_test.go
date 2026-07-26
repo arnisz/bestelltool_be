@@ -59,6 +59,7 @@ func (t *fakeTx) Requests() ports.RequestRepository              { return t.requ
 func (t *fakeTx) Resources() ports.ResourceRepository            { return t.resources }
 func (t *fakeTx) Allocations() ports.AllocationRepository        { return t.allocations }
 func (t *fakeTx) Audits() ports.AuditWriter                      { return t.audits }
+func (t *fakeTx) AuditEvents() ports.AuditRepository             { return t.audits }
 func (t *fakeTx) Idempotency() ports.IdempotencyStore            { return nil }
 func (t *fakeTx) AuthIdentities() ports.AuthIdentityRepository   { return nil }
 func (t *fakeTx) Sessions() ports.SessionRepository              { return nil }
@@ -202,6 +203,10 @@ type fakeAuditWriter struct {
 	events      []domain.AuditEvent
 	txIDs       []int
 	failOnWrite bool
+}
+
+func (w *fakeAuditWriter) RecordEvent(ctx context.Context, event domain.AuditEvent) error {
+	return w.Write(ctx, event)
 }
 
 func (w *fakeAuditWriter) Write(ctx context.Context, event domain.AuditEvent) error {

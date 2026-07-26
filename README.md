@@ -191,11 +191,11 @@ Copy the example environment file and adjust it for local use:
 copy .env.example .env
 ```
 
-`docker compose` reads `.env` automatically. At minimum it must set `AUTH_STATIC_TOKENS` (dev-only bearer tokens, format `token:user-id:role,...`) — see `agents.md` for the full environment variable reference and `status.md` for the current tech debt around this variable.
+`docker compose` reads `.env` automatically. The example includes `AUTH_STATIC_TOKENS` for the transitional static-token mode (format `token:user-id:role,...`). This variable is accepted exclusively when `APP_ENV=dev`; setting it in `staging` or `prod` causes a fatal startup error (SEC-26). See `agents.md` for the complete environment-variable reference.
 
 ## Running the Project
 
-The server requires `APP_ENV`, `DATABASE_URL`, and `AUTH_STATIC_TOKENS` at startup (`cmd/server/config.go`); it fails fast if any is missing or invalid. The quickest way to run it locally is via Docker Compose, which supplies all three.
+The server requires `APP_ENV`, `DATABASE_URL`, and `ENCRYPTION_KEY` at startup (`cmd/server/config.go`); it fails fast if any is missing or invalid. `AUTH_STATIC_TOKENS` is additionally required only for `AUTH_MODE=static`, which is restricted to `APP_ENV=dev` (SEC-26). The quickest way to run it locally is via Docker Compose.
 
 ### Start the development database
 
@@ -280,7 +280,7 @@ PostgreSQL integration tests in `internal/adapters/postgres/` (and the end-to-en
 docker compose --profile test up -d --force-recreate --wait db-test
 ```
 
-(Equivalent to running `emptydb.bat`.) This starts an ephemeral, tmpfs-backed PostgreSQL instance on `127.0.0.1:5433` for a reproducible, empty test database.
+(Equivalent to running `emptydb.bat`.) This starts an ephemeral, tmpfs-backed PostgreSQL instance on port `5433` for a reproducible, empty test database. The `db-test` port mapping deliberately has no loopback host address (`"5433:5432"`): Docker therefore binds it to `0.0.0.0`, which allows WSL2 to reach the Windows-hosted test database. Do not change this mapping to `127.0.0.1:5433:5432`; WSL2 race tests would no longer be able to connect.
 
 ```powershell
 $env:TEST_DATABASE_URL = "postgres://dev:dev@127.0.0.1:5433/resource_test?sslmode=disable"
@@ -288,6 +288,18 @@ go test -count=1 -p 1 ./...
 ```
 
 Use `-p 1` here because the postgres and http packages otherwise access the same test database in parallel.
+
+### Race Tests from WSL2
+
+Run the ephemeral `db-test` container from Windows as above. In WSL2, use the Windows host address rather than `localhost`, then run the complete suite with the race detector:
+
+```bash
+WIN_IP=$(ip route show default | awk '{print $3}')
+TEST_DATABASE_URL="postgres://dev:dev@${WIN_IP}:5433/resource_test?sslmode=disable" \
+  go test -count=1 -p 1 -race ./...
+```
+
+Before running this command, verify that the URL still targets only `resource_test` on port `5433`. The integration-test cleanup drops the `public` schema, so it must never point at the development database on port `5432`. This WSL2 setup is the supported local path for the mandatory race run when the Windows Go toolchain has no suitable C compiler.
 
 ## Development with GoLand
 

@@ -8,8 +8,9 @@ import (
 
 // Principal represents an authenticated user identity.
 type Principal struct {
-	UserID domain.UserID
-	Role   domain.ActorRole
+	UserID    domain.UserID
+	Role      domain.ActorRole
+	SessionID string
 }
 
 // Authenticator verifies a bearer token and returns the associated Principal.
@@ -59,6 +60,12 @@ type AuditWriter interface {
 	Write(ctx context.Context, event domain.AuditEvent) error
 }
 
+// AuditRepository records security and business audit events in the current
+// unit-of-work transaction.
+type AuditRepository interface {
+	RecordEvent(ctx context.Context, event domain.AuditEvent) error
+}
+
 // IdempotencyResult stores replayable outcome information.
 type IdempotencyResult struct {
 	StatusCode int
@@ -80,6 +87,7 @@ type Transaction interface {
 	Resources() ResourceRepository
 	Allocations() AllocationRepository
 	Audits() AuditWriter
+	AuditEvents() AuditRepository
 	Idempotency() IdempotencyStore
 	AuthIdentities() AuthIdentityRepository
 	Sessions() SessionRepository

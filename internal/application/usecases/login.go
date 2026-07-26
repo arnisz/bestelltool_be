@@ -94,7 +94,10 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 		return nil, fmt.Errorf("password: %w", domain.ErrRequiredField)
 	}
 
-	var output *LoginOutput
+	var (
+		output             *LoginOutput
+		credentialsInvalid bool
+	)
 	err := uc.uow.WithinTransaction(ctx, func(ctx context.Context, tx ports.Transaction) error {
 		dummyHash, err := uc.passwordHasher.Hash("dummy-password-never-used")
 		if err != nil {
@@ -105,6 +108,25 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 			_, _, err := uc.passwordHasher.Verify(in.Password, dummyHash)
 			if err != nil {
 				return fmt.Errorf("dummy verify: %w", err)
+			}
+			return nil
+		}
+
+		recordFailure := func(user *domain.User) error {
+			if user == nil {
+				return nil
+			}
+
+			event := newAuditEvent(
+				AuditMeta{ActorID: user.ID, ActorRole: user.Role},
+				domain.EntityTypeAuthIdentity,
+				string(user.ID),
+				string(domain.ActionAuthLoginFailed),
+				"",
+				"",
+			)
+			if err := tx.AuditEvents().RecordEvent(ctx, event); err != nil {
+				return fmt.Errorf("record failed login audit event: %w", err)
 			}
 			return nil
 		}
@@ -128,7 +150,11 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 				if err := runDummyVerify(); err != nil {
 					return err
 				}
-				return ports.ErrCredentialsInvalid
+				if err := recordFailure(user); err != nil {
+					return err
+				}
+				credentialsInvalid = true
+				return nil
 			}
 		}
 
@@ -137,14 +163,19 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 			if err := runDummyVerify(); err != nil {
 				return err
 			}
-			return ports.ErrCredentialsInvalid
+			credentialsInvalid = true
+			return nil
 		}
 
 		// Check if user is active.
 		if !user.IsActive {
 			// Still run the password verification for constant time (SEC-03).
 			_, _, _ = uc.passwordHasher.Verify(in.Password, authIdentity.PasswordHash)
-			return ports.ErrCredentialsInvalid
+			if err := recordFailure(user); err != nil {
+				return err
+			}
+			credentialsInvalid = true
+			return nil
 		}
 
 		// Verify password.
@@ -153,7 +184,11 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 			return fmt.Errorf("verify password: %w", err)
 		}
 		if !ok {
-			return ports.ErrCredentialsInvalid
+			if err := recordFailure(user); err != nil {
+				return err
+			}
+			credentialsInvalid = true
+			return nil
 		}
 
 		// Optional: rehash password if algorithm parameters have changed.
@@ -237,6 +272,18 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 			return fmt.Errorf("save refresh token: %w", err)
 		}
 
+		event := newAuditEvent(
+			AuditMeta{ActorID: user.ID, ActorRole: user.Role},
+			domain.EntityTypeSession,
+			session.ID,
+			string(domain.ActionSessionCreate),
+			"",
+			"active",
+		)
+		if err := tx.AuditEvents().RecordEvent(ctx, event); err != nil {
+			return fmt.Errorf("record login audit event: %w", err)
+		}
+
 		// Return the tokens to the caller.
 		output = &LoginOutput{
 			AccessToken:  accessToken,
@@ -249,6 +296,9 @@ func (uc *LoginUseCase) Execute(ctx context.Context, in LoginInput) (*LoginOutpu
 
 	if err != nil {
 		return nil, err
+	}
+	if credentialsInvalid {
+		return nil, ports.ErrCredentialsInvalid
 	}
 
 	return output, nil

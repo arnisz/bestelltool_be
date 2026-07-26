@@ -51,6 +51,10 @@ func (t *txAdapter) Audits() ports.AuditWriter {
 	return &auditWriter{q: t.state.q}
 }
 
+func (t *txAdapter) AuditEvents() ports.AuditRepository {
+	return &auditRepository{q: t.state.q}
+}
+
 func (t *txAdapter) Idempotency() ports.IdempotencyStore {
 	return &idempotencyStore{q: t.state.q}
 }

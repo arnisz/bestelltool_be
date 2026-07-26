@@ -28,6 +28,10 @@ const (
 	EntityTypeAllocation EntityType = "allocation"
 	// EntityTypeResource identifies resource events.
 	EntityTypeResource EntityType = "resource"
+	// EntityTypeSession identifies authentication session events.
+	EntityTypeSession EntityType = "session"
+	// EntityTypeAuthIdentity identifies local credential events.
+	EntityTypeAuthIdentity EntityType = "auth_identity"
 )
 
 // AuditEvent is a pure domain data structure for future auditing.

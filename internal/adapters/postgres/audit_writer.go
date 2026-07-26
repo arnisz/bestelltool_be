@@ -5,12 +5,12 @@ import (
 	"context"
 )
 
-type auditWriter struct {
+type auditRepository struct {
 	q querier
 }
 
-func (w *auditWriter) Write(ctx context.Context, event domain.AuditEvent) error {
-	_, err := w.q.Exec(ctx, `
+func (r *auditRepository) RecordEvent(ctx context.Context, event domain.AuditEvent) error {
+	_, err := r.q.Exec(ctx, `
 INSERT INTO audit_events(
     id,
     client_occurred_at,
@@ -41,4 +41,17 @@ INSERT INTO audit_events(
 	}
 
 	return nil
+}
+
+type auditWriter struct {
+	q          querier
+	repository *auditRepository
+}
+
+func (w *auditWriter) Write(ctx context.Context, event domain.AuditEvent) error {
+	repository := w.repository
+	if repository == nil {
+		repository = &auditRepository{q: w.q}
+	}
+	return repository.RecordEvent(ctx, event)
 }

@@ -200,6 +200,42 @@ func TestSessionSaveAndGet(t *testing.T) {
 	}
 }
 
+func TestSessionGetByTokenHash(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now()
+	user, _ := domain.NewUser("user-session-hash", "session-hash", domain.ActorRoleTechnician, "Session Hash", nil, now)
+	tokenHash := sha256.Sum256([]byte("access-token-secret"))
+	session := &ports.Session{
+		ID:         uuid.New().String(),
+		UserID:     user.ID,
+		ActiveRole: domain.ActorRoleTechnician,
+		TokenHash:  tokenHash[:],
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(15 * time.Minute),
+	}
+
+	uow := NewUnitOfWork(pool)
+	err := uow.WithinTransaction(t.Context(), func(ctx context.Context, tx ports.Transaction) error {
+		if err := tx.Users().Create(ctx, user); err != nil {
+			return err
+		}
+		if err := tx.Sessions().Save(ctx, session); err != nil {
+			return err
+		}
+		retrieved, err := tx.Sessions().GetByTokenHash(ctx, tokenHash[:])
+		if err != nil {
+			return err
+		}
+		if retrieved.ID != session.ID || retrieved.UserID != user.ID {
+			t.Fatalf("GetByTokenHash() = %#v, want session %q for user %q", retrieved, session.ID, user.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithinTransaction error = %v", err)
+	}
+}
+
 // TestSessionRevoke tests the Revoke operation.
 func TestSessionRevoke(t *testing.T) {
 	pool := testPool(t)
@@ -256,6 +292,71 @@ func TestSessionRevoke(t *testing.T) {
 
 	if err != nil {
 		t.Fatalf("WithinTransaction error = %v", err)
+	}
+}
+
+func TestSessionRevokeAllForUserExcept(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now()
+	user, err := domain.NewUser("user-session-revoke-others", "revoke-others", domain.ActorRoleTechnician, "Revoke Others", nil, now)
+	if err != nil {
+		t.Fatalf("NewUser() error = %v", err)
+	}
+	currentHash := sha256.Sum256([]byte("current"))
+	otherHash := sha256.Sum256([]byte("other"))
+	current := &ports.Session{
+		ID:         uuid.New().String(),
+		UserID:     user.ID,
+		ActiveRole: domain.ActorRoleTechnician,
+		TokenHash:  currentHash[:],
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(time.Hour),
+	}
+	other := &ports.Session{
+		ID:         uuid.New().String(),
+		UserID:     user.ID,
+		ActiveRole: domain.ActorRoleTechnician,
+		TokenHash:  otherHash[:],
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(time.Hour),
+	}
+
+	uow := NewUnitOfWork(pool)
+	err = uow.WithinTransaction(t.Context(), func(ctx context.Context, tx ports.Transaction) error {
+		if err := tx.Users().Create(ctx, user); err != nil {
+			return err
+		}
+		if err := tx.Sessions().Save(ctx, current); err != nil {
+			return err
+		}
+		if err := tx.Sessions().Save(ctx, other); err != nil {
+			return err
+		}
+		return tx.Sessions().RevokeAllForUserExcept(ctx, user.ID, current.ID, now)
+	})
+	if err != nil {
+		t.Fatalf("WithinTransaction() error = %v", err)
+	}
+
+	err = uow.WithinTransaction(t.Context(), func(ctx context.Context, tx ports.Transaction) error {
+		currentSession, err := tx.Sessions().GetByID(ctx, current.ID)
+		if err != nil {
+			return err
+		}
+		otherSession, err := tx.Sessions().GetByID(ctx, other.ID)
+		if err != nil {
+			return err
+		}
+		if currentSession.RevokedAt != nil {
+			t.Fatalf("current session was revoked")
+		}
+		if otherSession.RevokedAt == nil {
+			t.Fatalf("other session was not revoked")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verify sessions: %v", err)
 	}
 }
 
@@ -411,6 +512,7 @@ func TestRefreshTokenUpdate(t *testing.T) {
 
 		// Now update original to point to successor
 		refreshToken.SuccessorTokenID = &successorID
+		refreshToken.EncryptedSuccessor = []byte("AES-GCM-ciphertext")
 		if err := tx.RefreshTokens().Update(ctx, refreshToken); err != nil {
 			return err
 		}
@@ -423,6 +525,9 @@ func TestRefreshTokenUpdate(t *testing.T) {
 
 		if retrieved.SuccessorTokenID == nil || *retrieved.SuccessorTokenID != successorID {
 			t.Errorf("SuccessorTokenID not updated: got %v, want %q", retrieved.SuccessorTokenID, successorID)
+		}
+		if string(retrieved.EncryptedSuccessor) != string(refreshToken.EncryptedSuccessor) {
+			t.Errorf("EncryptedSuccessor = %q, want %q", retrieved.EncryptedSuccessor, refreshToken.EncryptedSuccessor)
 		}
 
 		return nil

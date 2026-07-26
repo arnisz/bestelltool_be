@@ -38,8 +38,12 @@ type Session struct {
 // SessionRepository provides persistence access for sessions.
 type SessionRepository interface {
 	Save(ctx context.Context, session *Session) error
+	Update(ctx context.Context, session *Session) error
 	GetByID(ctx context.Context, id string) (*Session, error)
+	GetByTokenHash(ctx context.Context, tokenHash []byte) (*Session, error)
+	GetForUpdate(ctx context.Context, id string) (*Session, error)
 	Revoke(ctx context.Context, id string, at time.Time) error
+	RevokeAllForUserExcept(ctx context.Context, userID domain.UserID, exceptSessionID string, at time.Time) error
 }
 
 // RefreshToken represents one link in a refresh-token rotation lineage
@@ -49,24 +53,27 @@ type SessionRepository interface {
 // SuccessorTokenID being non-nil marks this token as already consumed - there
 // is no separate ConsumedAt field.
 type RefreshToken struct {
-	ID               string
-	SessionID        string
-	TokenHash        []byte
-	FamilyID         string
-	SuccessorTokenID *string
-	CreatedAt        time.Time
-	ExpiresAt        time.Time
-	RevokedAt        *time.Time
+	ID                 string
+	SessionID          string
+	TokenHash          []byte
+	FamilyID           string
+	SuccessorTokenID   *string
+	EncryptedSuccessor []byte
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	RevokedAt          *time.Time
 }
 
 // RefreshTokenRepository provides persistence access for refresh tokens.
 type RefreshTokenRepository interface {
 	Save(ctx context.Context, token *RefreshToken) error
 	GetByID(ctx context.Context, id string) (*RefreshToken, error)
+	GetForUpdate(ctx context.Context, id string) (*RefreshToken, error)
 	Update(ctx context.Context, token *RefreshToken) error
 	// GetFamily returns every token sharing familyID, for the SEC-08 replay
 	// case where the whole family must be revoked at once.
 	GetFamily(ctx context.Context, familyID string) ([]*RefreshToken, error)
+	GetFamilyForUpdate(ctx context.Context, familyID string) ([]*RefreshToken, error)
 }
 
 // PasswordHasher hashes and verifies passwords (Argon2id, SEC-02). The
@@ -85,6 +92,14 @@ type PasswordHasher interface {
 // math/rand.
 type SecretGenerator interface {
 	GenerateToken() (string, error)
+}
+
+// TokenEncryptor protects a short-lived refresh-token successor used solely
+// for D-2 retry recovery. Implementations must provide authenticated
+// encryption and reject altered ciphertext.
+type TokenEncryptor interface {
+	Encrypt(plaintext []byte) ([]byte, error)
+	Decrypt(ciphertext []byte) ([]byte, error)
 }
 
 // Clock provides the current time so session expiry, token lifetimes and

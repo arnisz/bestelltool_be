@@ -18,4 +18,8 @@ var (
 	ErrForbidden = errors.New("forbidden")
 	// ErrThrottled signals that the operation is rate-limited (retry with Retry-After).
 	ErrThrottled = errors.New("throttled")
+	// ErrTokenInvalid signals an invalid opaque access or refresh token.
+	ErrTokenInvalid = errors.New("token invalid")
+	// ErrTokenExpired signals an otherwise valid token that has expired.
+	ErrTokenExpired = errors.New("token expired")
 )

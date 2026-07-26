@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -8,15 +9,18 @@ import (
 )
 
 type serverConfig struct {
-	AppEnv          string
-	DatabaseURL     string
-	StaticTokens    string
-	RunMigrations   bool
-	HTTPAddr        string
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	IdleTimeout     time.Duration
-	ShutdownTimeout time.Duration
+	AppEnv            string
+	DatabaseURL       string
+	AuthMode          string
+	StaticTokens      string
+	EncryptionKey     string
+	TrustProxyHeaders bool
+	RunMigrations     bool
+	HTTPAddr          string
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	ShutdownTimeout   time.Duration
 }
 
 func loadConfigFromEnv() (serverConfig, error) {
@@ -29,11 +33,18 @@ func loadConfigFromEnv() (serverConfig, error) {
 	)
 
 	cfg := serverConfig{
-		AppEnv:       strings.TrimSpace(os.Getenv("APP_ENV")),
-		DatabaseURL:  strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		StaticTokens: strings.TrimSpace(os.Getenv("AUTH_STATIC_TOKENS")),
-		HTTPAddr:     strings.TrimSpace(os.Getenv("HTTP_ADDR")),
+		AppEnv:        strings.TrimSpace(os.Getenv("APP_ENV")),
+		DatabaseURL:   strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		AuthMode:      strings.TrimSpace(os.Getenv("AUTH_MODE")),
+		StaticTokens:  strings.TrimSpace(os.Getenv("AUTH_STATIC_TOKENS")),
+		EncryptionKey: strings.TrimSpace(os.Getenv("ENCRYPTION_KEY")),
+		HTTPAddr:      strings.TrimSpace(os.Getenv("HTTP_ADDR")),
 	}
+	trustProxyHeaders, err := parseBooleanEnv("TRUST_PROXY_HEADERS", false)
+	if err != nil {
+		return serverConfig{}, err
+	}
+	cfg.TrustProxyHeaders = trustProxyHeaders
 	if cfg.AppEnv == "" {
 		return serverConfig{}, fmt.Errorf("APP_ENV is required")
 	}
@@ -45,11 +56,25 @@ func loadConfigFromEnv() (serverConfig, error) {
 	if cfg.DatabaseURL == "" {
 		return serverConfig{}, fmt.Errorf("DATABASE_URL is required")
 	}
+	if cfg.AuthMode == "" {
+		cfg.AuthMode = "session"
+	}
+	if cfg.AuthMode != "session" && cfg.AuthMode != "static" {
+		return serverConfig{}, fmt.Errorf("AUTH_MODE must be one of: session, static")
+	}
 	if cfg.AppEnv != "dev" && cfg.StaticTokens != "" {
 		return serverConfig{}, fmt.Errorf("AUTH_STATIC_TOKENS is allowed only when APP_ENV=dev")
 	}
-	if cfg.StaticTokens == "" {
-		return serverConfig{}, fmt.Errorf("AUTH_STATIC_TOKENS is required")
+	if cfg.AuthMode == "static" {
+		if cfg.AppEnv != "dev" {
+			return serverConfig{}, fmt.Errorf("AUTH_MODE=static is allowed only when APP_ENV=dev")
+		}
+		if cfg.StaticTokens == "" {
+			return serverConfig{}, fmt.Errorf("AUTH_STATIC_TOKENS is required when AUTH_MODE=static")
+		}
+	}
+	if _, err := encryptionKeyBytes(cfg.EncryptionKey); err != nil {
+		return serverConfig{}, err
 	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = defaultHTTPAddr
@@ -86,6 +111,20 @@ func loadConfigFromEnv() (serverConfig, error) {
 	return cfg, nil
 }
 
+func encryptionKeyBytes(encoded string) ([]byte, error) {
+	if encoded == "" {
+		return nil, fmt.Errorf("ENCRYPTION_KEY is required")
+	}
+	key, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("ENCRYPTION_KEY must be standard base64: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("ENCRYPTION_KEY must decode to exactly 32 bytes")
+	}
+	return key, nil
+}
+
 func parseDurationEnv(key string, fallback time.Duration) (time.Duration, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
@@ -104,9 +143,13 @@ func parseDurationEnv(key string, fallback time.Duration) (time.Duration, error)
 }
 
 func parseRunMigrationsEnv(key string) (bool, error) {
+	return parseBooleanEnv(key, false)
+}
+
+func parseBooleanEnv(key string, fallback bool) (bool, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
-		return false, nil
+		return fallback, nil
 	}
 
 	switch strings.ToLower(raw) {

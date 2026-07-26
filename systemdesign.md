@@ -493,11 +493,15 @@ reuse detection is that protection.
 
 **Retry grace window (decision D-2):** on a flaky mobile connection the client
 may not receive the response to a successful refresh. To avoid forcing a
-re-login, presenting a consumed token *again* within `REFRESH_REPLAY_GRACE`
-(default 30 s) returns the already-issued successor token instead of creating a
-new one; this is why `successor_token_id` exists. Any presentation after the
-grace window is treated as replay. Setting the value to `0` disables the grace
-window at the cost of occasional forced re-logins. Clients must additionally
+re-login, a consumed token presented again within `REFRESH_REPLAY_GRACE`
+(default 30 s) returns its already-issued successor refresh token and a newly
+minted access token, without creating a second successor. The predecessor
+stores that successor only as AES-256-GCM ciphertext in
+`refresh_tokens.encrypted_successor`; plaintext tokens and token hashes are
+never stored in this recovery field. The AES key is the required, Base64-coded
+32-byte `ENCRYPTION_KEY` deployment secret. Any presentation after the grace
+window is treated as replay. Setting the value to `0` disables the grace window
+at the cost of occasional forced re-logins. Clients must additionally
 single-flight their refresh calls.
 
 Revocation triggers (SEC-10): user disabled, role assigned or revoked, password
@@ -552,7 +556,7 @@ migration per new role, which is acceptable and explicit.
 
 Typical actions: `user.create`, `user.update`, `user.disable`,
 `user.reactivate`, `user.password_reset`, `role.assign`, `role.revoke`,
-`session.create`, `session.revoke`, `session.replay_detected`,
+`session.create`, `session.refresh`, `session.revoke`, `session.replay_detected`,
 `auth.login_failed`, `resource_class.create`, `resource_class.update`,
 `resource_class.deactivate`, `resource.create`, `resource.update`.
 
@@ -735,7 +739,7 @@ writes are audited through one path.
 | ID | Decision | Status |
 | :--- | :--- | :--- |
 | **D-1** | Access token opaque + session lookup instead of JWT | proposed, default in this document |
-| **D-2** | `REFRESH_REPLAY_GRACE` default 30 s for offline mobile clients | proposed, needs confirmation |
+| **D-2** | `REFRESH_REPLAY_GRACE` default 30 s for offline mobile clients; the existing successor is stored AES-256-GCM-encrypted for a bounded retry response | decided (2026-07-26) |
 | **D-3** | Technicians hold `request.read` for *all* requests (current behaviour, deliberate and fully audited). Scoping to `request.read.own` is the recommended hardening once mobile clients are in the field. | open |
 | **D-4** | Whether reference master data maintenance moves from direct DB access to the API before beta | open |
 | **D-5** | Whether Entra ID / OIDC is available in the target network at all | open, decides Section 7.1 vs 7.2 |
